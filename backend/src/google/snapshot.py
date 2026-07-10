@@ -1,6 +1,8 @@
 from enum import Enum
 import json
+import os
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
+from uuid import uuid4
 import zlib
 
 import attr
@@ -77,6 +79,11 @@ def serialize(objs: objs_type, teams: List[Team]) -> bytes:
 
 def deserialize(raw: bytes) -> Tuple[objs_type, List[Team]]:
     payload = json.loads(zlib.decompress(raw).decode("utf-8"))
+    schema = payload.get("schema")
+    if schema != SNAPSHOT_SCHEMA:
+        raise ValueError(
+            f"snapshot schema {schema} != expected {SNAPSHOT_SCHEMA}"
+        )
     data = payload["objs"]
     objs: objs_type = (
         _load(Year, YearORM, data["year"]),
@@ -93,7 +100,7 @@ def deserialize(raw: bytes) -> Tuple[objs_type, List[Team]]:
 def write_snapshot(year: int, objs: objs_type, teams: List[Team]) -> None:
     bucket = _bucket()
     key = snapshot_key(year)
-    tmp_key = key + ".tmp"
+    tmp_key = f"{key}.{os.getpid()}.{uuid4().hex}.tmp"
     bucket.blob(tmp_key).upload_from_string(
         serialize(objs, teams), "application/octet-stream"
     )
@@ -106,4 +113,8 @@ def read_snapshot(year: int) -> Optional[Tuple[objs_type, List[Team]]]:
         raw = _bucket().blob(snapshot_key(year)).download_as_bytes()
     except Exception:
         return None
-    return deserialize(raw)
+    try:
+        return deserialize(raw)
+    except Exception as e:
+        print(f"snapshot unreadable, falling back to DB path: {e}")
+        return None
