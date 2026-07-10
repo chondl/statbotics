@@ -11,6 +11,10 @@ const nextConfig = {
   },
   env: {
     PROD: process.env.PROD || "false",
+    // Staging overrides (inlined at build time). When unset, constants.tsx
+    // falls back to the PROD/local defaults.
+    BACKEND_URL: process.env.BACKEND_URL || "",
+    BUCKET_URL: process.env.BUCKET_URL || "",
   },
 };
 

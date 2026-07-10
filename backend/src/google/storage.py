@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
 import json
+import os
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 import zlib
 
@@ -32,7 +33,10 @@ from src.site.match import _read_noteworthy_matches, _read_upcoming_matches
 from src.site.team import _read_all_teams, _read_team
 from src.site.team_year import _read_team_years
 
-BUCKET_NAME = "site_v1" if PROD else "site_dev_v1"
+# GCS bucket names are globally unique, so staging cannot reuse site_v1 /
+# site_dev_v1. GCS_BUCKET overrides the name for staging (e.g.
+# statbotics-staging-site); prod/local fall back to the historical defaults.
+BUCKET_NAME = os.getenv("GCS_BUCKET") or ("site_v1" if PROD else "site_dev_v1")
 
 IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 MANIFEST_CACHE = "public, max-age=60"

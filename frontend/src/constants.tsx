@@ -1,13 +1,18 @@
 export const PROD = process.env.PROD === "True";
 
 // undici bug requires 127.0.0.1 instead of localhost
-export const BACKEND_URL = PROD
-  ? "https://api.statbotics.io/v3/site"
-  : "http://127.0.0.1:8000/v3/site";
+// BACKEND_URL / BUCKET_URL, if provided via env (inlined at build time through
+// next.config.js), override the PROD/local defaults. Used for staging, which
+// points at its own Cloud Run backend and its own GCS bucket.
+export const BACKEND_URL =
+  process.env.BACKEND_URL ||
+  (PROD ? "https://api.statbotics.io/v3/site" : "http://127.0.0.1:8000/v3/site");
 
-export const BUCKET_URL = PROD
-  ? "https://storage.googleapis.com/site_v1"
-  : "https://storage.googleapis.com/site_dev_v1";
+export const BUCKET_URL =
+  process.env.BUCKET_URL ||
+  (PROD
+    ? "https://storage.googleapis.com/site_v1"
+    : "https://storage.googleapis.com/site_dev_v1");
 
 export const TBA_API_KEY = "XeUIxlvO4CPc44NlLE3ncevDg7bAhp6CRy6zC9M2aQb2zGfys0M30eKwavFJSEJr";
 
