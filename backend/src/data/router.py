@@ -5,6 +5,7 @@ from src.constants import BACKEND_URL, CURR_YEAR
 from src.data.main import refresh_teams, update_curr_year, reset_all_years
 from src.data.tba import check_year_partial as check_year_partial_tba
 from src.db.read import get_etags as get_etags_db, get_events as get_events_db
+from src.google.storage import GC_GRACE_HOURS, gc_versioned_blobs
 
 data_router = APIRouter()
 site_router = APIRouter()
@@ -44,6 +45,12 @@ async def update_curr_year_debug_endpoint():
 @data_router.get("/refresh_teams")
 async def refresh_teams_endpoint():
     result = refresh_teams()
+    return {"status": "success", **result}
+
+
+@data_router.get("/gc_blobs")
+async def gc_blobs_endpoint(grace_hours: int = GC_GRACE_HOURS, dry_run: bool = False):
+    result = gc_versioned_blobs(grace_hours=grace_hours, dry_run=dry_run)
     return {"status": "success", **result}
 
 
