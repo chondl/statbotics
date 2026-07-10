@@ -76,15 +76,29 @@ def write_objs(
     upload_file_to_gcs(_read_events(year_obj, events), f"events/{year}")
 
     # event/{event.key}
-    orig_events = orig_objs[2] if orig_objs else {}
-    new_events = [e for e in events if str(e) != str(orig_events.get(e.pk(), ""))]
-    if len(new_events) > 0:
+    def group_by_event(source: Optional[objs_type]):
         event_to_matches = defaultdict(list)
         event_to_team_events = defaultdict(list)
-        for m in objs[4].values():
-            event_to_matches[m.event].append(m)
-        for te in objs[3].values():
-            event_to_team_events[te.event].append(te)
+        if source is not None:
+            for m in source[4].values():
+                event_to_matches[m.event].append(m)
+            for te in source[3].values():
+                event_to_team_events[te.event].append(te)
+        return event_to_matches, event_to_team_events
+
+    event_to_matches, event_to_team_events = group_by_event(objs)
+    orig_matches, orig_team_events = group_by_event(orig_objs)
+    orig_events = orig_objs[2] if orig_objs else {}
+    year_changed = orig_objs is None or year_obj != orig_objs[0]
+    new_events = [
+        e
+        for e in events
+        if year_changed
+        or e != orig_events.get(e.pk())
+        or event_to_matches[e.key] != orig_matches[e.key]
+        or event_to_team_events[e.key] != orig_team_events[e.key]
+    ]
+    if len(new_events) > 0:
         data = []
         object_names = []
         for event in new_events:
