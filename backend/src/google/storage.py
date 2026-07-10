@@ -20,8 +20,10 @@ from src.google.publish import (
     VERSION_PREFIX,
     Manifest,
     UploadPlan,
+    content_hash,
     historical_key,
     plan_uploads,
+    versioned_key,
 )
 from src.site.event import _read_all_events, _read_events, _read_event
 from src.site.match import _read_noteworthy_matches, _read_upcoming_matches
@@ -117,6 +119,7 @@ def write_objs(
     objs: objs_type,
     orig_objs: Optional[objs_type] = None,
     teams: Optional[List[Team]] = None,
+    parquet: Optional[Dict[str, bytes]] = None,
 ) -> None:
     year = CURR_YEAR
     year_obj = objs[0]
@@ -246,6 +249,17 @@ def write_objs(
 
     cycle = datetime.now(timezone.utc).isoformat()
     plan = plan_uploads(rendered, prev, cycle, hist_epoch=HIST_EPOCH)
+    if parquet:
+        # Fold parquet into the same manifest so the cycle writes it exactly once,
+        # last: DuckDB and the frontend never disagree by a cycle, and a partial
+        # read can never clobber the site-blob references.
+        prev_manifest = prev or Manifest()
+        for logical, data in parquet.items():
+            digest = content_hash(data)
+            key = versioned_key(logical, digest)
+            if prev_manifest.hash_for(logical) != digest:
+                plan.uploads[key] = data
+            plan.manifest.blobs[logical] = key
     _publish(plan)
 
     return
