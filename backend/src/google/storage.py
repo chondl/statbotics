@@ -1,6 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import gzip
 import json
 from typing import Any, Dict, List, Optional
 import zlib
@@ -77,7 +78,10 @@ def write_manifest(manifest: Manifest, bucket: Any = None) -> None:
     bucket = bucket or _bucket()
     blob = bucket.blob(MANIFEST_OBJECT)
     blob.cache_control = MANIFEST_CACHE
-    blob.upload_from_string(manifest.to_json().encode("utf-8"), "application/json")
+    blob.content_encoding = "gzip"
+    blob.upload_from_string(
+        gzip.compress(manifest.to_json().encode("utf-8")), "application/json"
+    )
 
 
 def _publish(plan: UploadPlan) -> None:
