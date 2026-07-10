@@ -33,13 +33,21 @@ async function getManifest(): Promise<Manifest | null> {
   if (DISABLE_GCS) return null;
   const now = Date.now();
   if (!manifestPromise || now - manifestPromise.fetchedAt > MANIFEST_TTL_MS) {
-    manifestPromise = { promise: fetchManifest(), fetchedAt: now };
+    const promise = fetchManifest();
+    manifestPromise = { promise, fetchedAt: now };
+    // Don't pin every client to the uncached legacy path for a full TTL after one
+    // blipped fetch: drop a null result from the cache so the next call retries.
+    promise.then((manifest) => {
+      if (manifest === null && manifestPromise?.promise === promise) {
+        manifestPromise = null;
+      }
+    });
   }
   return manifestPromise.promise;
 }
 
 function toLogicalPath(apiPath: string): string {
-  return apiPath.replace("?", ".").replace("&", ".").replace(/^\//, "");
+  return apiPath.replace(/[?&]/g, ".").replace(/^\//, "");
 }
 
 function resolveBucketUrl(logicalPath: string, manifest: Manifest | null): string {
