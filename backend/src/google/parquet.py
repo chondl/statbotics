@@ -1,5 +1,5 @@
 import io
-from typing import Any, List, Type
+from typing import Any, Dict, List, Type
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -14,7 +14,7 @@ from src.db.models.team_event import TeamEventORM
 from src.db.models.team_year import TeamYearORM
 from src.db.models.year import YearORM
 from src.db_duckdb.schema import PARQUET_PREFIX, columns, to_row
-from src.google.publish import Manifest, content_hash, versioned_key
+from src.google.publish import content_hash, versioned_key
 from src.google.storage import IMMUTABLE_CACHE, _bucket, read_manifest, write_manifest
 
 ARROW_TYPES = {
@@ -45,7 +45,9 @@ def serialize_table(objs: List[Model], orm_type: Type[ModelORM]) -> bytes:
     return buf.getvalue()
 
 
-def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
+def build_parquet_uploads(
+    year: int, objs: objs_type, teams: List[Team]
+) -> Dict[str, bytes]:
     sources: List[Any] = [
         ("team_years", list(objs[1].values()), TeamYearORM),
         ("events", list(objs[2].values()), EventORM),
@@ -54,14 +56,25 @@ def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
         ("teams", teams, TeamORM),
         ("year", [objs[0]], YearORM),
     ]
+    return {
+        parquet_logical(year, table): serialize_table(rows, orm_type)
+        for table, rows, orm_type in sources
+    }
+
+
+def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
+    # Standalone path for historical (non-current) years, which publish parquet
+    # without a co-occurring site-blob publish. The current-year cycle folds parquet
+    # into the single site manifest write (see storage.write_objs).
+    manifest = read_manifest()
+    if manifest is None:
+        print("skipped parquet manifest update: manifest unavailable")
+        return
 
     bucket = _bucket()
-    manifest = read_manifest() or Manifest()
     blobs = dict(manifest.blobs)
     changed = False
-    for table, rows, orm_type in sources:
-        data = serialize_table(rows, orm_type)
-        logical = parquet_logical(year, table)
+    for logical, data in build_parquet_uploads(year, objs, teams).items():
         digest = content_hash(data)
         if manifest.hash_for(logical) == digest:
             continue
