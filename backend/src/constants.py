@@ -36,6 +36,7 @@ AUTH_KEY_BLACKLIST: List[str] = []
 
 CURR_YEAR = 2026
 DISABLE_GCS = False
+DISABLE_DB = os.getenv("DISABLE_DB", "False") == "True"
 HIST_EPOCH = 1
 
 # MISC

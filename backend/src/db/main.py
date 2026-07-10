@@ -1,11 +1,11 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, MappedAsDataclass, sessionmaker
 
-from src.constants import CONN_STR
+from src.constants import CONN_STR, DISABLE_DB
 
-engine = create_engine(CONN_STR)
+engine = None if DISABLE_DB else create_engine(CONN_STR)
 
-Session = sessionmaker(bind=engine)
+Session = None if DISABLE_DB else sessionmaker(bind=engine)
 
 
 # Only for type hints, doesn't enable slots
