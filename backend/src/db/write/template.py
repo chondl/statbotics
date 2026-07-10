@@ -3,7 +3,6 @@ from typing import Any, Callable, Dict, List, Tuple, Type
 import attr
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm.session import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.db.main import Session
 from src.db.models.etag import ETagORM
@@ -14,6 +13,7 @@ from src.db.models.team import TeamORM
 from src.db.models.team_event import TeamEventORM
 from src.db.models.team_year import TeamYearORM
 from src.db.models.year import YearORM
+from src.db.transaction import run_transaction
 
 CUTOFF = 1000
 
