@@ -8,7 +8,7 @@ import zlib
 from google.cloud import storage
 
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
-from src.data.utils import objs_type
+from src.data.utils import nan_safe_eq, objs_type
 from src.db.functions import get_noteworthy_matches, get_upcoming_matches
 from src.db.read.event import get_events as get_events_db
 from src.db.read.team import get_teams as get_teams_db
@@ -128,22 +128,43 @@ def write_objs(
     add(f"events/{year}", _read_events(year_obj, events))
 
     # event/{event.key}
+    prev = read_manifest()
+    prev_blobs = prev.blobs if prev else {}
     event_to_matches = defaultdict(list)
     event_to_team_events = defaultdict(list)
     for m in objs[4].values():
         event_to_matches[m.event].append(m)
     for te in objs[3].values():
         event_to_team_events[te.event].append(te)
+
+    orig_events = orig_objs[2] if orig_objs else {}
+    orig_matches: Dict[str, List[Any]] = defaultdict(list)
+    orig_team_events: Dict[str, List[Any]] = defaultdict(list)
+    if orig_objs is not None:
+        for m in orig_objs[4].values():
+            orig_matches[m.event].append(m)
+        for te in orig_objs[3].values():
+            orig_team_events[te.event].append(te)
+
     for event in events:
-        add(
-            f"event/{event.key}",
-            _read_event(
-                year_obj,
-                event,
-                event_to_matches.get(event.key, []),
-                event_to_team_events.get(event.key, []),
-            ),
+        logical = f"event/{event.key}"
+        event_changed = (
+            not nan_safe_eq(event, orig_events.get(event.pk()))
+            or not nan_safe_eq(event_to_matches[event.key], orig_matches[event.key])
+            or not nan_safe_eq(
+                event_to_team_events[event.key], orig_team_events[event.key]
+            )
         )
+        if event_changed or logical not in prev_blobs:
+            add(
+                logical,
+                _read_event(
+                    year_obj,
+                    event,
+                    event_to_matches.get(event.key, []),
+                    event_to_team_events.get(event.key, []),
+                ),
+            )
 
     # team_to_events
     team_to_events = defaultdict(list)
@@ -185,7 +206,6 @@ def write_objs(
             _read_upcoming_matches(upcoming_matches),
         )
 
-    prev = read_manifest()
     cycle = datetime.now(timezone.utc).isoformat()
     plan = plan_uploads(rendered, prev, cycle, hist_epoch=HIST_EPOCH)
     _publish(plan)
