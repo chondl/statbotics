@@ -1,15 +1,15 @@
-import { BUCKET_URL, CURR_YEAR } from "../constants";
+import { CURR_YEAR } from "../constants";
 import { APITeam, APITeamEvent } from "../types/api";
 import { TeamYearData, TeamYearRedirect } from "../types/data";
 import { getEvent } from "./event";
-import query, { decompress, version } from "./storage";
+import query, { fetchBucketData, version } from "./storage";
 import { getYearTeamYears } from "./teams";
 
 export async function getTeam(team: number): Promise<{ team: APITeam; team_years: any[] }> {
   const urlSuffix = `/team/${team}`;
   const storageKey = `team_${team}_${version}`;
 
-  return query(storageKey, urlSuffix, false, 0, 60); // 1 minute
+  return query(storageKey, urlSuffix, true, 0, 60); // 1 minute
 }
 
 export async function getTeamYear(
@@ -19,26 +19,13 @@ export async function getTeamYear(
   const urlSuffix = `/team/${team}/${year}`;
   const storageKey = `team_${team}_${year}_${version}`;
 
-  const readBucket = async (url: string) => {
-    const res = await fetch(url, {
-      next: { revalidate: 0 },
-    });
-    if (res.ok) {
-      const buffer = await res.arrayBuffer();
-      const data = decompress(buffer);
-      return data;
-    } else {
-      throw new Error(`Failed to fetch from bucket: ${res.status}`);
-    }
-  };
-
   try {
     // try to reconstruct output from team, team_to_events, and events
     if (year !== CURR_YEAR) {
       throw new Error("Not current year");
     }
     const [teamToEvents, teamData, teamYearData] = await Promise.all([
-      readBucket(`${BUCKET_URL}/team_to_events`) as Promise<{ [key: number]: string[] }>,
+      fetchBucketData("team_to_events") as Promise<{ [key: number]: string[] }>,
       getTeam(team),
       getYearTeamYears(year),
     ]);
@@ -85,7 +72,7 @@ export async function getTeamYear(
       team_matches: teamMatches,
     };
   } catch (e) {
-    return query(storageKey, urlSuffix, false, 0, year === CURR_YEAR ? 60 : 60 * 60); // 1 minute / 1 hour
+    return query(storageKey, urlSuffix, true, 0, year === CURR_YEAR ? 60 : 60 * 60); // 1 minute / 1 hour
   }
 }
 

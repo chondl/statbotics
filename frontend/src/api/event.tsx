@@ -13,8 +13,8 @@ export async function getTeamEventTeamMatches(
   team: number,
   event: string
 ): Promise<APITeamMatch[]> {
-  const urlSuffix = `/event/${event}/team_matches/${team}`;
-  const storageKey = `event_${event}_team_matches_${team}_${version}`;
-
-  return query(storageKey, urlSuffix, false, 0, 60); // 1 minute
+  const eventData = await getEvent(event);
+  return ((eventData?.team_matches ?? []) as APITeamMatch[]).filter(
+    (tm: any) => tm.team === team
+  );
 }
