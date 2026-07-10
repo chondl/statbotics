@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 import zlib
 
 from google.cloud import storage
@@ -11,6 +11,7 @@ from google.cloud import storage
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
 from src.data.utils import nan_safe_eq, objs_type
 from src.db.functions import get_noteworthy_matches, get_upcoming_matches
+from src.db.models.team import Team
 from src.db.read.event import get_events as get_events_db
 from src.db.read.team import get_teams as get_teams_db
 from src.db.read.team_year import get_team_years as get_team_years_db
@@ -63,6 +64,17 @@ def upload_file_to_gcs(data: Any, object_name: str) -> None:
     _upload_bytes(_bucket(), object_name, compress(data), None)
 
 
+T = TypeVar("T")
+
+
+def _best_effort(label: str, fn: Callable[[], T], default: T) -> T:
+    try:
+        return fn()
+    except Exception as e:
+        print(f"skipped {label}: {e}")
+        return default
+
+
 def read_manifest() -> Optional[Manifest]:
     try:
         raw = _bucket().blob(MANIFEST_OBJECT).download_as_bytes()
@@ -104,6 +116,7 @@ def _publish(plan: UploadPlan) -> None:
 def write_objs(
     objs: objs_type,
     orig_objs: Optional[objs_type] = None,
+    teams: Optional[List[Team]] = None,
 ) -> None:
     year = CURR_YEAR
     year_obj = objs[0]
@@ -114,7 +127,8 @@ def write_objs(
         rendered[object_name] = compress(data)
 
     # teams/all
-    teams = get_teams_db()
+    if teams is None:
+        teams = _best_effort("teams", get_teams_db, [])
     add("teams/all", _read_all_teams(teams))
 
     # team_years/{CURR_YEAR}
@@ -129,7 +143,9 @@ def write_objs(
     )
 
     # events/all
-    add("events/all", _read_all_events(get_events_db()))
+    all_events = _best_effort("events/all", get_events_db, None)
+    if all_events is not None:
+        add("events/all", _read_all_events(all_events))
 
     # events/{CURR_YEAR}
     events = list(objs[2].values())
@@ -181,38 +197,49 @@ def write_objs(
     add("team_to_events", team_to_events)
 
     # team/{team.team}
-    all_team_years = get_team_years_db()
-    team_years_by_team: Dict[int, List[Any]] = defaultdict(list)
-    for ty in all_team_years:
-        team_years_by_team[ty.team].append(ty)
-    teams_by_num = {t.team: t for t in teams}
-    for num in {ty.team for ty in team_years}:
-        team_obj = teams_by_num.get(num)
-        if team_obj is None:
-            continue
-        add(f"team/{num}", _read_team(team_obj, team_years_by_team.get(num, [])))
+    all_team_years = _best_effort("team pages", get_team_years_db, None)
+    if all_team_years is not None:
+        team_years_by_team: Dict[int, List[Any]] = defaultdict(list)
+        for ty in all_team_years:
+            team_years_by_team[ty.team].append(ty)
+        teams_by_num = {t.team: t for t in teams}
+        for num in {ty.team for ty in team_years}:
+            team_obj = teams_by_num.get(num)
+            if team_obj is None:
+                continue
+            add(f"team/{num}", _read_team(team_obj, team_years_by_team.get(num, [])))
 
     # noteworthy_matches/{year}
-    noteworthy_matches = get_noteworthy_matches(
-        year=year, country=None, state=None, district=None, elim=None, week=None
+    noteworthy_matches = _best_effort(
+        "noteworthy_matches",
+        lambda: get_noteworthy_matches(
+            year=year, country=None, state=None, district=None, elim=None, week=None
+        ),
+        None,
     )
-    add(f"noteworthy_matches/{year}", _read_noteworthy_matches(noteworthy_matches))
+    if noteworthy_matches is not None:
+        add(f"noteworthy_matches/{year}", _read_noteworthy_matches(noteworthy_matches))
 
     # upcoming_matches?limit=20&metric={predicted_time | max_epa | sum_epa | diff_epa}
     for metric in ["predicted_time", "max_epa", "sum_epa", "diff_epa"]:
-        upcoming_matches = get_upcoming_matches(
-            country=None,
-            state=None,
-            district=None,
-            elim=None,
-            minutes=-1,
-            limit=20,
-            metric=metric,
+        upcoming_matches = _best_effort(
+            f"upcoming_matches.{metric}",
+            lambda metric=metric: get_upcoming_matches(
+                country=None,
+                state=None,
+                district=None,
+                elim=None,
+                minutes=-1,
+                limit=20,
+                metric=metric,
+            ),
+            None,
         )
-        add(
-            f"upcoming_matches.limit=20.metric={metric}",
-            _read_upcoming_matches(upcoming_matches),
-        )
+        if upcoming_matches is not None:
+            add(
+                f"upcoming_matches.limit=20.metric={metric}",
+                _read_upcoming_matches(upcoming_matches),
+            )
 
     cycle = datetime.now(timezone.utc).isoformat()
     plan = plan_uploads(rendered, prev, cycle, hist_epoch=HIST_EPOCH)
