@@ -15,7 +15,7 @@ from src.api.query import (
     year_query,
 )
 from src.db.models import Match
-from src.db.read import get_match, get_matches
+from src.api.backend import get_match, get_matches
 from src.utils.alru_cache import alru_cache
 from src.utils.decorators import (
     async_fail_gracefully_plural,
