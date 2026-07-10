@@ -36,6 +36,7 @@ AUTH_KEY_BLACKLIST: List[str] = []
 
 CURR_YEAR = 2026
 DISABLE_GCS = False
+HIST_EPOCH = 1
 
 # MISC
 

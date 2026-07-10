@@ -34,18 +34,8 @@ async def read_all_teams(response: Response, no_cache: bool = False) -> Any:
     return _read_all_teams(teams)
 
 
-@router.get("/team/{team_num}")
-@async_fail_gracefully_singular
-async def read_team_years(
-    response: Response, team_num: int, no_cache: bool = False
-) -> Any:
-    team: Optional[Team] = await get_team_cached(team=team_num, no_cache=no_cache)
-    if team is None:
-        raise Exception("Team not found")
-
-    team_years: List[TeamYear] = await get_team_years_cached(
-        team=team_num, no_cache=True
-    )
+def _read_team(team: Team, team_years: List[TeamYear]) -> Dict[str, Any]:
+    team_years = sorted(team_years, key=lambda x: x.year)
     team_year_stats = [
         {
             "year": x.year,
@@ -64,12 +54,26 @@ async def read_team_years(
         for x in team_years
     ]
 
-    out = {
+    return {
         "team": team.to_dict(),
         "team_years": team_year_stats,
     }
 
-    return out
+
+@router.get("/team/{team_num}")
+@async_fail_gracefully_singular
+async def read_team_years(
+    response: Response, team_num: int, no_cache: bool = False
+) -> Any:
+    team: Optional[Team] = await get_team_cached(team=team_num, no_cache=no_cache)
+    if team is None:
+        raise Exception("Team not found")
+
+    team_years: List[TeamYear] = await get_team_years_cached(
+        team=team_num, no_cache=True
+    )
+
+    return _read_team(team, team_years)
 
 
 @router.get("/team/{team_num}/{year}")
@@ -109,6 +113,16 @@ async def read_team_year(
         team=team_num, year=year, no_cache=no_cache
     )
 
+    return _read_team_year(year_obj, team, team_year, team_events, matches)
+
+
+def _read_team_year(
+    year_obj: Year,
+    team: Team,
+    team_year: TeamYear,
+    team_events: List[TeamEvent],
+    matches: List[Match],
+) -> Dict[str, Any]:
     matches = sorted(matches, key=lambda x: x.time)
 
     event_times: Dict[str, Optional[int]] = {e.event: None for e in team_events}
@@ -123,13 +137,11 @@ async def read_team_year(
 
     team_matches = sorted(team_year.team_matches or [], key=lambda x: x["time"])
 
-    out = {
+    return {
         "year": year_obj.to_dict(),
         "team": team.to_dict(),
         "team_year": team_year.to_dict(),
         "team_events": [x.to_dict() for x in team_events],
         "matches": [x.to_dict() for x in matches],
-        "team_matches": [{"team": team_num, **tm} for tm in team_matches],
+        "team_matches": [{"team": team.team, **tm} for tm in team_matches],
     }
-
-    return out
