@@ -53,13 +53,16 @@ def read_objs(year: int) -> objs_type:
     if year_obj is None:
         raise Exception("Year not found")
 
+    def by_pk(objs: list) -> dict:
+        return {o.pk(): o for o in sorted(objs, key=lambda o: o.pk())}
+
     return (
         year_obj,
-        {t.pk(): t for t in get_team_years_db(year=year)},
-        {e.pk(): e for e in get_events_db(year=year)},
-        {te.pk(): te for te in get_team_events_db(year=year)},
-        {m.pk(): m for m in get_matches_db(year=year)},
-        {e.pk(): e for e in get_etags_db(year=year)},
+        by_pk(get_team_years_db(year=year)),
+        by_pk(get_events_db(year=year)),
+        by_pk(get_team_events_db(year=year)),
+        by_pk(get_matches_db(year=year)),
+        by_pk(get_etags_db(year=year)),
     )
 
 
