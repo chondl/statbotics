@@ -72,10 +72,13 @@ async def read_root():
 
 @router.get("/info")
 def get_info():
+    from src.data import main as data_main
+
     return {
         "PROD": PROD,
         "CONN_STR": "REDACTED" if PROD else CONN_STR,
         "PYTHON_VERSION": platform.python_version(),
+        "DB_LESS_SEED_INCOMPLETE": data_main.db_less_seed_incomplete,
     }
 
 

@@ -43,6 +43,10 @@ from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import write_objs as write_objs_storage
 
+# Set true when a db-less cross-season EPA seed found no prior-year data (a
+# partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
+db_less_seed_incomplete = False
+
 
 def process_year(
     year_num: int,
@@ -64,6 +68,14 @@ def process_year(
                     all_team_years[ty.year][ty.team] = ty
         except Exception:
             traceback.print_exc()
+        if DISABLE_DB and year_num > 2002 and not all_team_years:
+            global db_less_seed_incomplete
+            db_less_seed_incomplete = True
+            print(
+                "WARNING: db-less mode found no prior-year team_years for "
+                f"{year_num}; every team will regress to the rookie mean. Back-fill "
+                "prior years to Parquet BEFORE running db-less or EPA seeds are wrong."
+            )
 
     new_teams, objs = process_year_tba(year_num, teams, objs, tba_partial, cache)
     teams += new_teams
@@ -99,9 +111,12 @@ def process_year(
         write_objs_db(year_num, objs, orig_objs if partial else None, not partial)
         timer.print(str(year_num) + " Write DB")
 
-        if not DISABLE_GCS:
-            write_parquet(year_num, objs, teams)
-            timer.print(str(year_num) + " Write Parquet")
+    # Current-year parquet is folded into the site manifest above; historical years
+    # publish parquet on their own manifest write (independent of the DB, so db-less
+    # backfill still produces parquet).
+    if not curr_year_gcs and not DISABLE_GCS:
+        write_parquet(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Parquet")
 
     return teams
 
