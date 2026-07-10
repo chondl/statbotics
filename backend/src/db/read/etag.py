@@ -1,10 +1,10 @@
 from typing import List, Optional
 
 from sqlalchemy.orm.session import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.db.main import Session
 from src.db.models.etag import ETag, ETagORM
+from src.db.transaction import run_transaction
 
 
 def get_etags(year: Optional[int] = None, path: Optional[str] = None) -> List[ETag]:

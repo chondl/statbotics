@@ -1,9 +1,9 @@
 from sqlalchemy.orm import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.db.main import Session
 from src.db.models.team import TeamORM
 from src.db.models.team_year import TeamYearORM
+from src.db.transaction import run_transaction
 
 
 def update_team_districts() -> None:

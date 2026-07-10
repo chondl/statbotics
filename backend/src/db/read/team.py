@@ -1,11 +1,11 @@
 from typing import List, Optional
 
 from sqlalchemy.orm.session import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.db.main import Session
 from src.db.models.team import Team, TeamORM
 from src.db.read.main import common_filters
+from src.db.transaction import run_transaction
 
 
 def get_team(team: int) -> Optional[Team]:
