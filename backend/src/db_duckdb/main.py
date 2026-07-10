@@ -1,5 +1,7 @@
 import os
+import shutil
 import tempfile
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -11,9 +13,13 @@ from src.db_duckdb.schema import PARQUET_PREFIX, SPECS, columns, from_row
 SYNC_TTL = float(os.environ.get("DUCKDB_SYNC_TTL", "30"))
 
 _con: Optional[duckdb.DuckDBPyConnection] = None
-_cache_dir: Optional[str] = None
-_generations: Dict[str, int] = {}
+_cache_root: Optional[str] = None
+_current_dir: Optional[str] = None
+_prev_dir: Optional[str] = None
+_keys: Dict[str, str] = {}
+_manifest_generation: Optional[int] = None
 _last_sync: float = 0.0
+_sync_lock = threading.Lock()
 
 
 def _connection() -> duckdb.DuckDBPyConnection:
@@ -24,42 +30,80 @@ def _connection() -> duckdb.DuckDBPyConnection:
 
 
 def _sync() -> str:
-    global _cache_dir, _last_sync
-    if _cache_dir is None:
-        _cache_dir = tempfile.mkdtemp(prefix="duckdb_parquet_")
+    global _cache_root, _current_dir, _prev_dir, _keys
+    global _manifest_generation, _last_sync
+
     now = time.monotonic()
-    if _last_sync and now - _last_sync < SYNC_TTL:
-        return _cache_dir
-    from src.google.storage import _bucket
+    if _current_dir is not None and _last_sync and now - _last_sync < SYNC_TTL:
+        return _current_dir
 
-    for blob in _bucket().list_blobs(prefix=f"{PARQUET_PREFIX}/"):
-        if _generations.get(blob.name) == blob.generation:
-            continue
-        dest = os.path.join(_cache_dir, blob.name)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        blob.download_to_filename(dest)
-        _generations[blob.name] = blob.generation
-    _last_sync = now
-    return _cache_dir
+    with _sync_lock:
+        now = time.monotonic()
+        if _current_dir is not None and _last_sync and now - _last_sync < SYNC_TTL:
+            return _current_dir
+
+        from src.google.publish import MANIFEST_OBJECT, Manifest
+        from src.google.storage import _bucket
+
+        if _cache_root is None:
+            _cache_root = tempfile.mkdtemp(prefix="duckdb_parquet_")
+
+        blob = _bucket().blob(MANIFEST_OBJECT)
+        try:
+            blob.reload()
+        except Exception:
+            _last_sync = now
+            if _current_dir is None:
+                _current_dir = tempfile.mkdtemp(prefix="gen_", dir=_cache_root)
+            return _current_dir
+
+        if blob.generation == _manifest_generation and _current_dir is not None:
+            _last_sync = now
+            return _current_dir
+
+        manifest = Manifest.from_json(blob.download_as_bytes())
+        entries = {
+            logical: key
+            for logical, key in manifest.blobs.items()
+            if logical.startswith(PARQUET_PREFIX + "/")
+        }
+
+        gen_dir = tempfile.mkdtemp(prefix="gen_", dir=_cache_root)
+        for logical, key in entries.items():
+            dest = os.path.join(gen_dir, logical)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            prev = os.path.join(_current_dir, logical) if _current_dir else None
+            if _keys.get(logical) == key and prev is not None and os.path.exists(prev):
+                os.link(prev, dest)
+            else:
+                _bucket().blob(key).download_to_filename(dest)
+
+        old_prev = _prev_dir
+        _prev_dir = _current_dir
+        _current_dir = gen_dir
+        _keys = entries
+        _manifest_generation = blob.generation
+        _last_sync = now
+        if old_prev is not None:
+            shutil.rmtree(old_prev, ignore_errors=True)
+        return _current_dir
 
 
-def _years() -> List[int]:
-    base = os.path.join(_sync(), PARQUET_PREFIX)
-    if not os.path.isdir(base):
+def _years(base: str) -> List[int]:
+    root = os.path.join(base, PARQUET_PREFIX)
+    if not os.path.isdir(root):
         return []
-    return sorted(int(y) for y in os.listdir(base) if y.isdigit())
+    return sorted(int(y) for y in os.listdir(root) if y.isdigit())
 
 
-def _source(table: str, year: Optional[int] = None) -> str:
-    base = _sync()
+def _source(base: str, table: str, year: Optional[int] = None) -> str:
     if year is None:
         return f"read_parquet('{base}/{PARQUET_PREFIX}/*/{table}.parquet')"
     return f"read_parquet('{base}/{PARQUET_PREFIX}/{year}/{table}.parquet')"
 
 
-def _teams_source() -> str:
-    base = _sync()
-    year = max(_years())
+def _teams_source(base: str) -> str:
+    year = max(_years(base))
     return f"read_parquet('{base}/{PARQUET_PREFIX}/{year}/teams.parquet')"
 
 
@@ -112,7 +156,7 @@ def _one(
 
 def get_team(team: int) -> Optional[Model]:
     model, orm = SPECS["teams"]
-    return _one(model, orm, _teams_source(), ['"team" = ?'], [team])
+    return _one(model, orm, _teams_source(_sync()), ['"team" = ?'], [team])
 
 
 def get_teams(
@@ -130,13 +174,21 @@ def get_teams(
         {"country": country, "state": state, "district": district, "active": active}
     )
     return _query(
-        model, orm, _teams_source(), where, params, metric, ascending, limit, offset
+        model,
+        orm,
+        _teams_source(_sync()),
+        where,
+        params,
+        metric,
+        ascending,
+        limit,
+        offset,
     )
 
 
 def get_year(year: int) -> Optional[Model]:
     model, orm = SPECS["year"]
-    return _one(model, orm, _source("year", year), ['"year" = ?'], [year])
+    return _one(model, orm, _source(_sync(), "year", year), ['"year" = ?'], [year])
 
 
 def get_years(
@@ -146,7 +198,9 @@ def get_years(
     offset: Optional[int] = None,
 ) -> List[Model]:
     model, orm = SPECS["year"]
-    return _query(model, orm, _source("year"), [], [], metric, ascending, limit, offset)
+    return _query(
+        model, orm, _source(_sync(), "year"), [], [], metric, ascending, limit, offset
+    )
 
 
 def get_team_year(team: int, year: int) -> Optional[Model]:
@@ -154,7 +208,7 @@ def get_team_year(team: int, year: int) -> Optional[Model]:
     return _one(
         model,
         orm,
-        _source("team_years", year),
+        _source(_sync(), "team_years", year),
         ['"team" = ?', '"year" = ?'],
         [team, year],
     )
@@ -188,7 +242,7 @@ def get_team_years(
     return _query(
         model,
         orm,
-        _source("team_years", year),
+        _source(_sync(), "team_years", year),
         where,
         params,
         metric,
@@ -200,7 +254,7 @@ def get_team_years(
 
 def get_event(event_id: str) -> Optional[Model]:
     model, orm = SPECS["events"]
-    return _one(model, orm, _source("events"), ['"key" = ?'], [event_id])
+    return _one(model, orm, _source(_sync(), "events"), ['"key" = ?'], [event_id])
 
 
 def get_events(
@@ -229,7 +283,7 @@ def get_events(
     return _query(
         model,
         orm,
-        _source("events", year),
+        _source(_sync(), "events", year),
         where,
         params,
         metric,
@@ -242,7 +296,11 @@ def get_events(
 def get_team_event(team: int, event: str) -> Optional[Model]:
     model, orm = SPECS["team_events"]
     return _one(
-        model, orm, _source("team_events"), ['"team" = ?', '"event" = ?'], [team, event]
+        model,
+        orm,
+        _source(_sync(), "team_events"),
+        ['"team" = ?', '"event" = ?'],
+        [team, event],
     )
 
 
@@ -280,7 +338,7 @@ def get_team_events(
     return _query(
         model,
         orm,
-        _source("team_events", year),
+        _source(_sync(), "team_events", year),
         where,
         params,
         metric,
@@ -292,7 +350,7 @@ def get_team_events(
 
 def get_match(match: str) -> Optional[Model]:
     model, orm = SPECS["matches"]
-    return _one(model, orm, _source("matches"), ['"key" = ?'], [match])
+    return _one(model, orm, _source(_sync(), "matches"), ['"key" = ?'], [match])
 
 
 def get_matches(
@@ -315,7 +373,7 @@ def get_matches(
     return _query(
         model,
         orm,
-        _source("matches", year),
+        _source(_sync(), "matches", year),
         where,
         params,
         metric,
