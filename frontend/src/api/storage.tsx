@@ -121,19 +121,14 @@ export async function fetchBucketData(logicalPath: string): Promise<any> {
   return bucketInFlight[logicalPath];
 }
 
-async function query(
+const inFlight: { [storageKey: string]: Promise<any> } = {};
+
+async function fetchAndStore(
   storageKey: string,
   apiPath: string,
   checkBucket: boolean,
-  minLength: number,
   expiry: number
 ) {
-  const cacheData = await getWithExpiry(storageKey);
-  if (cacheData && (minLength === 0 || cacheData?.length > minLength)) {
-    log(`Used Local Storage: ${storageKey}`);
-    return cacheData;
-  }
-
   const start = performance.now();
 
   let buffer = null;
@@ -165,6 +160,31 @@ async function query(
 
   if (buffer) {
     await setWithExpiry(storageKey, buffer, expiry);
+    return buffer;
+  }
+}
+
+async function query(
+  storageKey: string,
+  apiPath: string,
+  checkBucket: boolean,
+  minLength: number,
+  expiry: number
+) {
+  const cacheData = await getWithExpiry(storageKey);
+  if (cacheData && (minLength === 0 || cacheData?.length > minLength)) {
+    log(`Used Local Storage: ${storageKey}`);
+    return cacheData;
+  }
+
+  if (!inFlight[storageKey]) {
+    inFlight[storageKey] = fetchAndStore(storageKey, apiPath, checkBucket, expiry).finally(() => {
+      delete inFlight[storageKey];
+    });
+  }
+
+  const buffer = await inFlight[storageKey];
+  if (buffer) {
     return buffer;
   }
 
