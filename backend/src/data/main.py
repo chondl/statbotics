@@ -54,7 +54,7 @@ def process_year(
 ) -> List[Team]:
     timer = Timer()
     curr_year_gcs = year_num == CURR_YEAR and not DISABLE_GCS
-    orig_objs = None if curr_year_gcs else deepcopy(objs)
+    orig_objs = deepcopy(objs)
     if all_team_years is None:
         all_team_years = defaultdict(dict)
         try:
@@ -83,7 +83,7 @@ def process_year(
         write_snapshot(year_num, objs, teams)
         timer.print(str(year_num) + " Write Snapshot")
 
-        write_objs_storage(objs, None, teams)
+        write_objs_storage(objs, orig_objs if partial else None, teams)
         timer.print(str(year_num) + " Write Storage")
 
         try:
