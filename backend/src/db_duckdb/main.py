@@ -426,13 +426,13 @@ def _event_filters(
 
 
 def _joined_matches(
-    year: int, where: List[str], params: List[Any], order: str, limit: int
+    base: str, year: int, where: List[str], params: List[Any], order: str, limit: int
 ) -> List[Model]:
     model, orm = SPECS["matches"]
     cols = columns(orm)
     sql = (
-        f"SELECT m.* FROM {_source('matches', year)} AS m "
-        f"JOIN {_source('events', year)} AS e ON m.event = e.key "
+        f"SELECT m.* FROM {_source(base, 'matches', year)} AS m "
+        f"JOIN {_source(base, 'events', year)} AS e ON m.event = e.key "
         f"WHERE {' AND '.join(where)} ORDER BY {order} LIMIT {int(limit)}"
     )
     cursor = _connection().cursor()
@@ -464,8 +464,10 @@ def get_noteworthy_matches(
     red = "m.red_score" if year < 2016 else "m.red_no_foul"
     blue = "m.blue_score" if year < 2016 else "m.blue_no_foul"
 
+    base = _sync()
+
     def top(order: str) -> List[Match]:
-        return _joined_matches(year, where, params, order, 30)  # type: ignore
+        return _joined_matches(base, year, where, params, order, 30)  # type: ignore
 
     out: Dict[str, List[Match]] = {
         "high_score": top(f"greatest({red}, {blue}) DESC, m.time ASC"),
@@ -473,7 +475,9 @@ def get_noteworthy_matches(
         "losing_score": top("least(m.red_score, m.blue_score) DESC, m.time ASC"),
     }
     if year >= 2016:
-        out["high_auto_score"] = top("greatest(m.red_auto, m.blue_auto) DESC, m.time ASC")
+        out["high_auto_score"] = top(
+            "greatest(m.red_auto, m.blue_auto) DESC, m.time ASC"
+        )
         out["high_teleop_score"] = top(
             "greatest(m.red_teleop, m.blue_teleop) DESC, m.time ASC"
         )
@@ -530,15 +534,19 @@ def get_upcoming_matches(
 
     model, orm = SPECS["matches"]
     cols = columns(orm)
+    base = _sync()
     sql = (
-        f"SELECT m.*, e.name AS event_name "
-        f"FROM {_source('matches', CURR_YEAR)} AS m, {_source('events', CURR_YEAR)} AS e "
+        f"SELECT m.*, e.name AS event_name FROM {_source(base, 'matches', CURR_YEAR)} "
+        f"AS m, {_source(base, 'events', CURR_YEAR)} AS e "
         f"WHERE {' AND '.join(where)}{order} LIMIT {int(limit)}"
     )
     cursor = _connection().cursor()
     cursor.execute(sql, params)
     names = [d[0] for d in cursor.description]
     return [
-        (from_row(model, cols, dict(zip(names, row))), dict(zip(names, row))["event_name"])
+        (
+            from_row(model, cols, dict(zip(names, row))),
+            dict(zip(names, row))["event_name"],
+        )
         for row in cursor.fetchall()
     ]
