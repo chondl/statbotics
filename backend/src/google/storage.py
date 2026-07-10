@@ -9,7 +9,7 @@ import zlib
 from google.cloud import storage
 
 from src.constants import CURR_YEAR, PROD
-from src.data.utils import objs_type
+from src.data.utils import nan_safe_eq, objs_type
 from src.db.functions import get_noteworthy_matches, get_upcoming_matches
 from src.db.read.event import get_events as get_events_db
 from src.db.read.team import get_teams as get_teams_db
@@ -41,7 +41,7 @@ def upload_file_to_gcs(data: Any, object_name: str) -> None:
 
 def upload_files_to_gcs(data: List[Any], object_names: List[str]) -> None:
     with ThreadPoolExecutor() as executor:
-        executor.map(upload_file_to_gcs, data, object_names)
+        list(executor.map(upload_file_to_gcs, data, object_names))
 
 
 def write_objs(
@@ -89,14 +89,12 @@ def write_objs(
     event_to_matches, event_to_team_events = group_by_event(objs)
     orig_matches, orig_team_events = group_by_event(orig_objs)
     orig_events = orig_objs[2] if orig_objs else {}
-    year_changed = orig_objs is None or year_obj != orig_objs[0]
     new_events = [
         e
         for e in events
-        if year_changed
-        or e != orig_events.get(e.pk())
-        or event_to_matches[e.key] != orig_matches[e.key]
-        or event_to_team_events[e.key] != orig_team_events[e.key]
+        if not nan_safe_eq(e, orig_events.get(e.pk()))
+        or not nan_safe_eq(event_to_matches[e.key], orig_matches[e.key])
+        or not nan_safe_eq(event_to_team_events[e.key], orig_team_events[e.key])
     ]
     if len(new_events) > 0:
         data = []
