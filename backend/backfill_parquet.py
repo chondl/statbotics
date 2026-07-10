@@ -13,9 +13,8 @@ uses for historical years (``src.google.parquet.write_parquet`` /
 """
 
 import io
-import json
 import sys
-from typing import Dict, List, Set
+from typing import List
 
 import pyarrow.parquet as pq
 
@@ -26,26 +25,17 @@ from src.db.read.team import get_teams as get_teams_db
 from src.db.read.team_event import get_team_events as get_team_events_db
 from src.db.read.team_year import get_team_years as get_team_years_db
 from src.db.read.year import get_year as get_year_db
-from src.google.parquet import parquet_logical, write_parquet
-from src.google.storage import _bucket, read_manifest
+from src.google.parquet import build_parquet_uploads, parquet_logical
+from src.google.publish import content_hash, versioned_key
+from src.google.storage import (
+    IMMUTABLE_CACHE,
+    _bucket,
+    read_manifest,
+    write_manifest,
+)
 
-PROGRESS_OBJECT = "backfill/parquet_progress.json"
 SKIP_YEARS = {2021}
 TABLES = ["team_years", "events", "team_events", "matches", "teams", "year"]
-
-
-def _read_progress(bucket) -> Dict:
-    try:
-        raw = bucket.blob(PROGRESS_OBJECT).download_as_bytes()
-        return json.loads(raw)
-    except Exception:
-        return {"completed_years": []}
-
-
-def _write_progress(bucket, progress: Dict) -> None:
-    blob = bucket.blob(PROGRESS_OBJECT)
-    blob.cache_control = "no-cache"
-    blob.upload_from_string(json.dumps(progress).encode("utf-8"), "application/json")
 
 
 def _load_year_objs(year: int):
@@ -66,20 +56,44 @@ def _load_year_objs(year: int):
     ))
 
 
-def backfill_year(year: int, teams) -> Dict:
-    objs, meta = _load_year_objs(year)
-    if objs is None:
-        print(f"  {year}: no Year row, skipping")
-        return {}
-    write_parquet(year, objs, teams)
-    counts = meta["counts"]
-    print(
-        f"  {year}: wrote parquet "
-        f"(team_years={counts['team_years']}, events={counts['events']}, "
-        f"team_events={counts['team_events']}, matches={counts['matches']}, "
-        f"teams={len(teams)})"
-    )
-    return counts
+def backfill_years(years: List[int], teams, bucket) -> None:
+    """Upload every year's Parquet blobs, then update the manifest EXACTLY ONCE.
+
+    write_parquet does a per-call read-modify-write of the manifest, which races
+    the manifest's 60s Cache-Control in a tight multi-year loop (stale reads drop
+    additions). Uploading all content-addressed blobs first and folding every ref
+    into a single terminal manifest write is atomic and cache-safe — the same
+    "single manifest write" invariant the current-year cycle uses.
+    """
+    manifest = read_manifest()
+    if manifest is None:
+        print("ABORT: manifest unavailable; refusing to write a fresh one")
+        sys.exit(1)
+    blobs = dict(manifest.blobs)
+
+    for year in years:
+        objs, meta = _load_year_objs(year)
+        if objs is None:
+            print(f"  {year}: no Year row, skipping")
+            continue
+        for logical, data in build_parquet_uploads(year, objs, teams).items():
+            digest = content_hash(data)
+            key = versioned_key(logical, digest)
+            if manifest.hash_for(logical) != digest or logical not in blobs:
+                blob = bucket.blob(key)
+                blob.cache_control = IMMUTABLE_CACHE
+                blob.upload_from_string(data, "application/octet-stream")
+            blobs[logical] = key
+        c = meta["counts"]
+        print(
+            f"  {year}: staged parquet (team_years={c['team_years']}, "
+            f"events={c['events']}, team_events={c['team_events']}, "
+            f"matches={c['matches']}, teams={len(teams)})"
+        )
+
+    manifest.blobs = blobs
+    write_manifest(manifest, bucket)
+    print("Wrote manifest once with all staged Parquet refs.")
 
 
 def verify_year(year: int, teams) -> bool:
@@ -114,10 +128,13 @@ def verify_year(year: int, teams) -> bool:
 
 
 def main(argv: List[str]) -> None:
-    force = "--force" in argv
     verify = "--verify" in argv
     year_args = [int(a) for a in argv if a.isdigit()]
-    years = year_args or [y for y in range(2002, CURR_YEAR + 1) if y not in SKIP_YEARS]
+    years = [
+        y
+        for y in (year_args or range(2002, CURR_YEAR + 1))
+        if y not in SKIP_YEARS
+    ]
 
     bucket = _bucket()
     teams = get_teams_db()
@@ -125,28 +142,13 @@ def main(argv: List[str]) -> None:
     if verify:
         all_ok = True
         for year in years:
-            if year in SKIP_YEARS:
-                continue
             all_ok = verify_year(year, teams) and all_ok
         print("VERIFY: ALL OK" if all_ok else "VERIFY: FAILURES ABOVE")
         sys.exit(0 if all_ok else 1)
 
-    progress = _read_progress(bucket)
-    completed: Set[int] = set(progress.get("completed_years", []))
-
-    for year in years:
-        if year in SKIP_YEARS:
-            continue
-        if year in completed and not force:
-            print(f"{year}: already complete, skipping")
-            continue
-        print(f"{year}: backfilling parquet...")
-        backfill_year(year, teams)
-        completed.add(year)
-        progress["completed_years"] = sorted(completed)
-        _write_progress(bucket, progress)
-
-    print(f"Done. Parquet backfilled for years: {sorted(completed)}")
+    print(f"Backfilling Parquet for years: {years}")
+    backfill_years(years, teams, bucket)
+    print("Done.")
 
 
 if __name__ == "__main__":
