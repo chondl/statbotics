@@ -1,10 +1,11 @@
 import requests
 from fastapi import APIRouter, BackgroundTasks
 
-from src.constants import BACKEND_URL, CURR_YEAR
+from src.constants import BACKEND_URL, CURR_YEAR, DISABLE_DB
 from src.data.main import refresh_teams, update_curr_year, reset_all_years
 from src.data.tba import check_year_partial as check_year_partial_tba
 from src.db.read import get_etags as get_etags_db, get_events as get_events_db
+from src.google.snapshot import read_snapshot
 from src.google.storage import GC_GRACE_HOURS, gc_versioned_blobs
 
 data_router = APIRouter()
@@ -60,8 +61,13 @@ def update_curr_year_background():
 
 @site_router.get("/update_curr_year")
 async def update_curr_year_site_endpoint(background_tasks: BackgroundTasks):
-    event_objs = get_events_db(year=CURR_YEAR)
-    etags = get_etags_db(CURR_YEAR)
+    if DISABLE_DB:
+        loaded = read_snapshot(CURR_YEAR)
+        event_objs = list(loaded[0][2].values()) if loaded else []
+        etags = list(loaded[0][5].values()) if loaded else []
+    else:
+        event_objs = get_events_db(year=CURR_YEAR)
+        etags = get_etags_db(CURR_YEAR)
     is_new_data = check_year_partial_tba(CURR_YEAR, event_objs, etags)
     if not is_new_data:
         return {"status": "skipped"}
