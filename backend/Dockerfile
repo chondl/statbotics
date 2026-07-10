@@ -6,16 +6,15 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# libpq for psycopg2 (requirements pins source psycopg2==2.9.10); build tools for
-# any wheels that need compiling, then removed to keep the image small.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
+# requirements.txt pins source psycopg2==2.9.10, which needs a full libpq/compile
+# toolchain. psycopg2-binary is the identical module with a bundled libpq (the
+# same swap the local rig uses). Keep the tracked requirements.txt pristine by
+# rewriting the pin at build time rather than editing the file.
 COPY requirements.txt ./
-RUN pip install -r requirements.txt
+RUN sed 's/^psycopg2==/psycopg2-binary==/' requirements.txt > requirements.staging.txt \
+    && pip install -r requirements.staging.txt
 
 COPY . .
 
