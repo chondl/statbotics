@@ -8,8 +8,12 @@ from src.tba.utils import dump_cache, load_cache
 
 read_prefix = "https://www.thebluealliance.com/api/v3/"
 
+# TBA_AUTH_KEY (from Secret Manager on staging) overrides the hardcoded public
+# key, keeping the real key out of source. Falls back to AUTH_KEY when unset.
 session = Session()
-session.headers.update({"X-TBA-Auth-Key": AUTH_KEY, "X-TBA-Auth-Id": ""})
+session.headers.update(
+    {"X-TBA-Auth-Key": os.getenv("TBA_AUTH_KEY") or AUTH_KEY, "X-TBA-Auth-Id": ""}
+)
 
 
 def _get_tba(
