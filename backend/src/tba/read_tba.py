@@ -278,6 +278,8 @@ def get_event_matches(
         ):
             status = MatchStatus.UPCOMING
             winner = None
+            red_score = None
+            blue_score = None
 
         comp_level = CompLevel.INVALID
         if match["comp_level"] == "qm":
