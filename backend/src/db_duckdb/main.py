@@ -144,7 +144,12 @@ def _query(
         sql += f" OFFSET {int(offset)}"
 
     cursor = _connection().cursor()
-    cursor.execute(sql, params)
+    try:
+        cursor.execute(sql, params)
+    except duckdb.IOException as e:
+        if "No files found" in str(e):
+            return []
+        raise
     names = [d[0] for d in cursor.description]
     return [
         from_row(model_cls, cols, dict(zip(names, row))) for row in cursor.fetchall()

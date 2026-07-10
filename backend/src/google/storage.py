@@ -9,12 +9,14 @@ import zlib
 from google.cloud import storage
 
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
+from src.data.backend import (
+    get_events as get_events_db,
+    get_team_years as get_team_years_db,
+    get_teams as get_teams_db,
+)
 from src.data.utils import nan_safe_eq, objs_type
-from src.db.functions import get_noteworthy_matches, get_upcoming_matches
 from src.db.models.team import Team
-from src.db.read.event import get_events as get_events_db
-from src.db.read.team import get_teams as get_teams_db
-from src.db.read.team_year import get_team_years as get_team_years_db
+from src.site.backend import get_noteworthy_matches, get_upcoming_matches
 from src.google.publish import (
     MANIFEST_OBJECT,
     VERSION_PREFIX,
