@@ -16,7 +16,7 @@ from src.api.query import (
     year_query,
 )
 from src.db.models import Event
-from src.db.read import get_event, get_events
+from src.api.backend import get_event, get_events
 from src.utils.alru_cache import alru_cache
 from src.utils.decorators import (
     async_fail_gracefully_plural,
