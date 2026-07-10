@@ -1,6 +1,8 @@
 import os
 
-if os.environ.get("API_BACKEND", "").lower() == "duckdb":
+from src.constants import DISABLE_DB
+
+if DISABLE_DB or os.environ.get("API_BACKEND", "").lower() == "duckdb":
     from src.db_duckdb import (
         get_event,
         get_events,

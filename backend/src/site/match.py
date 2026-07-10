@@ -9,7 +9,7 @@ from src.api import (
     get_team_events_cached,
     get_year_cached,
 )
-from src.db.functions import get_noteworthy_matches, get_upcoming_matches
+from src.site.backend import get_noteworthy_matches, get_upcoming_matches
 from src.db.models import Event, Match, TeamEvent, Year
 
 # from src.site.helper import compress
