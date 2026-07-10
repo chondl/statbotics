@@ -55,7 +55,7 @@ def write_objs(
         orig_objs = create_objs(-1)
 
     def changed(curr: dict, prev: dict) -> list:
-        return [obj for obj in curr.values() if str(obj) != str(prev.get(obj.pk(), ""))]
+        return [obj for obj in curr.values() if obj != prev.get(obj.pk())]
 
     write_year_db(
         years=[objs[0]],
