@@ -103,8 +103,12 @@ def _source(base: str, table: str, year: Optional[int] = None) -> str:
 
 
 def _teams_source(base: str) -> str:
-    year = max(_years(base))
-    return f"read_parquet('{base}/{PARQUET_PREFIX}/{year}/teams.parquet')"
+    years = _years(base)
+    if not years:
+        # No parquet yet (first db-less deploy): glob resolves to no files, which
+        # _query degrades to an empty result instead of crashing on max([]).
+        return f"read_parquet('{base}/{PARQUET_PREFIX}/*/teams.parquet')"
+    return f"read_parquet('{base}/{PARQUET_PREFIX}/{max(years)}/teams.parquet')"
 
 
 def _query(
