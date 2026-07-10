@@ -1,5 +1,3 @@
-import base64
-import hashlib
 import io
 from typing import Any, List, Type
 
@@ -16,7 +14,8 @@ from src.db.models.team_event import TeamEventORM
 from src.db.models.team_year import TeamYearORM
 from src.db.models.year import YearORM
 from src.db_duckdb.schema import PARQUET_PREFIX, columns, to_row
-from src.google.storage import _bucket
+from src.google.publish import Manifest, content_hash, versioned_key
+from src.google.storage import IMMUTABLE_CACHE, _bucket, read_manifest, write_manifest
 
 ARROW_TYPES = {
     "int": pa.int64(),
@@ -28,7 +27,7 @@ ARROW_TYPES = {
 }
 
 
-def parquet_key(year: int, table: str) -> str:
+def parquet_logical(year: int, table: str) -> str:
     return f"{PARQUET_PREFIX}/{year}/{table}.parquet"
 
 
@@ -46,30 +45,6 @@ def serialize_table(objs: List[Model], orm_type: Type[ModelORM]) -> bytes:
     return buf.getvalue()
 
 
-def _b64_md5(data: bytes) -> str:
-    return base64.b64encode(hashlib.md5(data).digest()).decode()
-
-
-def _unchanged(bucket: Any, key: str, data: bytes) -> bool:
-    blob = bucket.blob(key)
-    try:
-        if not blob.exists():
-            return False
-        blob.reload()
-        if blob.md5_hash is not None:
-            return blob.md5_hash == _b64_md5(data)
-        return blob.download_as_bytes() == data
-    except Exception:
-        return False
-
-
-def _atomic_upload(bucket: Any, key: str, data: bytes) -> None:
-    tmp_key = key + ".tmp"
-    bucket.blob(tmp_key).upload_from_string(data, "application/octet-stream")
-    bucket.copy_blob(bucket.blob(tmp_key), bucket, key)
-    bucket.blob(tmp_key).delete()
-
-
 def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
     sources: List[Any] = [
         ("team_years", list(objs[1].values()), TeamYearORM),
@@ -81,9 +56,22 @@ def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
     ]
 
     bucket = _bucket()
+    manifest = read_manifest() or Manifest()
+    blobs = dict(manifest.blobs)
+    changed = False
     for table, rows, orm_type in sources:
         data = serialize_table(rows, orm_type)
-        key = parquet_key(year, table)
-        if _unchanged(bucket, key, data):
+        logical = parquet_logical(year, table)
+        digest = content_hash(data)
+        if manifest.hash_for(logical) == digest:
             continue
-        _atomic_upload(bucket, key, data)
+        key = versioned_key(logical, digest)
+        blob = bucket.blob(key)
+        blob.cache_control = IMMUTABLE_CACHE
+        blob.upload_from_string(data, "application/octet-stream")
+        blobs[logical] = key
+        changed = True
+
+    if changed:
+        manifest.blobs = blobs
+        write_manifest(manifest, bucket)
