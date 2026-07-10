@@ -201,6 +201,9 @@ def write_objs(
     if all_team_years is not None:
         team_years_by_team: Dict[int, List[Any]] = defaultdict(list)
         for ty in all_team_years:
+            if ty.year != year:
+                team_years_by_team[ty.team].append(ty)
+        for ty in team_years:
             team_years_by_team[ty.team].append(ty)
         teams_by_num = {t.team: t for t in teams}
         for num in {ty.team for ty in team_years}:
