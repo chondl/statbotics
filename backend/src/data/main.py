@@ -39,6 +39,7 @@ from src.db.write.main import (
     update_team_years as update_team_years_db,
     update_teams as update_teams_db,
 )
+from src.google.parquet import write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import write_objs as write_objs_storage
 
@@ -95,6 +96,10 @@ def process_year(
     else:
         write_objs_db(year_num, objs, orig_objs if partial else None, not partial)
         timer.print(str(year_num) + " Write DB")
+
+    if not DISABLE_GCS:
+        write_parquet(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Parquet")
 
     return teams
 
