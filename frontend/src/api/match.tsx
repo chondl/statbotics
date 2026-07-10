@@ -1,9 +1,25 @@
 import { MatchData } from "../types/data";
+import { getEvent } from "./event";
 import query, { version } from "./storage";
 
 export async function getMatch(match: string): Promise<MatchData> {
   const urlSuffix = `/match/${match}`;
   const storageKey = `match_${match}_${version}`;
 
-  return query(storageKey, urlSuffix, false, 0, 60); // 1 minute
+  try {
+    const eventData = await getEvent(match.split("_")[0]);
+    const matchData = eventData.matches.find((m) => m.key === match);
+    if (!matchData) {
+      throw new Error("Match not found in event blob");
+    }
+    return {
+      year: eventData.year,
+      event: eventData.event,
+      team_events: eventData.team_events,
+      match: matchData,
+      team_matches: eventData.team_matches.filter((tm) => tm.match === match),
+    };
+  } catch (e) {
+    return query(storageKey, urlSuffix, false, 0, 60); // 1 minute
+  }
 }
