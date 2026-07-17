@@ -53,7 +53,7 @@ const InnerPage = () => {
     start.setDate(start.getDate() - 1);
     end.setDate(end.getDate() + 1);
     if (today < start || today > end) return;
-    fetch(`${BACKEND_URL}/v3/site/ping/event/${event_id}`).catch(() => {});
+    fetch(`${BACKEND_URL}/ping/event/${event_id}`).catch(() => {});
   }, [event_id, data]);
 
   if (!data) {
