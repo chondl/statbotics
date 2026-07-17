@@ -48,8 +48,17 @@ const EventsLayout = ({
   // ex: 2024-01-01
   const today = new Date().toISOString().split("T")[0];
 
+  // Any event we have from TBA that is future or ongoing must be listed; only
+  // genuinely finished events go to Completed. Bucket by the date window rather
+  // than status: offseason events often sit in status "Upcoming" on their
+  // load-in day (TBA posts the schedule only once teams are checked in, which
+  // can be shortly before matches start), and keying off status === "Ongoing"
+  // made those events disappear from the list until their schedule posted.
+  const isCompleted = (event: APIEvent) =>
+    event.status === "Completed" || event.end_date < today;
+
   const ongoingEvents = sortedData
-    ?.filter((event) => event.status === "Ongoing" && event.end_date >= today)
+    ?.filter((event) => !isCompleted(event) && event.start_date <= today)
     .sort((a, b) => {
       if (a.current_match > 0 && b.current_match === 0) return -1;
       if (a.current_match === 0 && b.current_match > 0) return 1;
@@ -58,13 +67,11 @@ const EventsLayout = ({
   const ongoingN = ongoingEvents.length;
 
   const upcomingEvents = sortedData?.filter(
-    (event) => event.status === "Upcoming" && event.start_date >= today
+    (event) => !isCompleted(event) && event.start_date > today
   );
   const upcomingN = upcomingEvents.length;
 
-  const completedEvents = sortedData?.filter(
-    (event) => event.status === "Completed" || event.end_date < today
-  );
+  const completedEvents = sortedData?.filter(isCompleted);
   const completedN = completedEvents.length;
 
   return (
