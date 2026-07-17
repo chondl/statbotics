@@ -101,7 +101,9 @@ _ping_inflight: bool = False
 def _ping_probe():
     global _ping_inflight
     try:
-        requests.get(f"{BACKEND_URL}/v3/site/update_curr_year")
+        # Bounded timeout so a hung probe can never wedge _ping_inflight (and
+        # thus disable the fast path) permanently: (connect, read) seconds.
+        requests.get(f"{BACKEND_URL}/v3/site/update_curr_year", timeout=(5, 30))
     finally:
         _ping_inflight = False
 
