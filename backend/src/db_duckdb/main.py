@@ -12,7 +12,7 @@ from src.constants import CURR_YEAR
 from src.db.models.main import Model, ModelORM
 from src.db.models.match import Match
 from src.db_duckdb.schema import PARQUET_PREFIX, SPECS, columns, from_row
-from src.types.enums import MatchStatus
+from src.types.enums import EventType, MatchStatus
 
 SYNC_TTL = float(os.environ.get("DUCKDB_SYNC_TTL", "30"))
 
@@ -449,8 +449,8 @@ def get_noteworthy_matches(
     elim: Optional[bool],
     week: Optional[int],
 ) -> Dict[str, List[Match]]:
-    where = ["m.year = ?", "m.status = ?"]
-    params: List[Any] = [year, MatchStatus.COMPLETED.value]
+    where = ["m.year = ?", "m.status = ?", "e.type != ?"]
+    params: List[Any] = [year, MatchStatus.COMPLETED.value, EventType.OFFSEASON.value]
     e_where, e_params = _event_filters(country, state, district)
     where += e_where
     params += e_params
