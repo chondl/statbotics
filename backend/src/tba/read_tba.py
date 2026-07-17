@@ -5,9 +5,13 @@ from typing import Dict, List, Optional, Tuple, cast
 
 from src.tba.breakdown import clean_breakdown, post_clean_breakdown
 from src.tba.clean_data import clean_district, clean_state, get_match_time
-from src.tba.constants import (DISTRICT_OVERRIDES, EVENT_BLACKLIST,
-                               EVENT_TYPE_OVERRIDES, MATCH_BLACKLIST,
-                               PLACEHOLDER_TEAMS)
+from src.tba.constants import (
+    DISTRICT_OVERRIDES,
+    EVENT_BLACKLIST,
+    EVENT_TYPE_OVERRIDES,
+    MATCH_BLACKLIST,
+    PLACEHOLDER_TEAMS,
+)
 from src.tba.main import get_tba
 from src.tba.types import EventDict, MatchDict, TeamDict
 from src.types.enums import CompLevel, EventType, MatchStatus, MatchWinner
