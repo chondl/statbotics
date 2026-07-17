@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working in the `backend/` directory.
 
+> **This is the `staging` branch — what runs in production (the mirror).**
+> Its architecture differs from upstream `master`: Postgres/Cloud SQL +
+> DuckDB-over-Parquet serving in a single Cloud Run container, plus offseason
+> support and a read-triggered freshness ping. The **Router Structure** and
+> **Database** sections below still describe the older `master` architecture
+> (CockroachDB, split services) and are being reconciled — for how and *when*
+> EPA recomputes and data refreshes in production, read
+> [`docs/superpowers/rig/DATA-REFRESH.md`](../docs/superpowers/rig/DATA-REFRESH.md).
+
 ## Commands (run from `backend/`)
 
 ```bash
@@ -24,7 +33,7 @@ Three FastAPI routers are mounted at `/v3` in `main.py`:
 | `src/data/` | `/v3/data` | **ETL triggers** — internal endpoints that run the data pipeline. `update_curr_year` does a partial (incremental) refresh; `reset_curr_year` does a full refresh; `reset_all_years` rebuilds from 2002. |
 | `src/site/` | `/v3/site` | **Frontend-optimized API** — returns pre-shaped data for the website. Also writes results to GCS so the frontend can read from the bucket instead of hitting the DB directly. |
 
-In dev, the data router calls back to `http://localhost:8001` (a second uvicorn process). In prod, each router is deployed as a separate Cloud Run service (`deploy/`).
+In dev, the data router calls back to `http://localhost:8001` (a second uvicorn process). The `deploy/` App Engine configs split the routers into separate services, but **production (staging) serves all three routers from one Cloud Run container** — see [DATA-REFRESH.md](../docs/superpowers/rig/DATA-REFRESH.md) and [DEPLOY.md](../docs/superpowers/rig/deploy/DEPLOY.md).
 
 ## Data Pipeline (`src/data/`)
 
