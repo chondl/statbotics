@@ -14,7 +14,7 @@ from src.api.query import (
     state_query,
 )
 from src.db.models import Team
-from src.db.read import get_team, get_teams
+from src.api.backend import get_team, get_teams
 from src.utils.alru_cache import alru_cache
 from src.utils.decorators import (
     async_fail_gracefully_plural,
