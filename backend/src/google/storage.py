@@ -1,6 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import gzip
 import json
 from typing import Any, Dict, List, Optional
 import zlib
@@ -15,6 +16,7 @@ from src.db.read.team import get_teams as get_teams_db
 from src.db.read.team_year import get_team_years as get_team_years_db
 from src.google.publish import (
     MANIFEST_OBJECT,
+    VERSION_PREFIX,
     Manifest,
     UploadPlan,
     historical_key,
@@ -29,6 +31,9 @@ BUCKET_NAME = "site_v1" if PROD else "site_dev_v1"
 
 IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 MANIFEST_CACHE = "public, max-age=60"
+
+GC_GRACE_HOURS = 48
+GC_BATCH_SIZE = 100
 
 
 def compress(data: Any) -> bytes:
@@ -73,7 +78,10 @@ def write_manifest(manifest: Manifest, bucket: Any = None) -> None:
     bucket = bucket or _bucket()
     blob = bucket.blob(MANIFEST_OBJECT)
     blob.cache_control = MANIFEST_CACHE
-    blob.upload_from_string(manifest.to_json().encode("utf-8"), "application/json")
+    blob.content_encoding = "gzip"
+    blob.upload_from_string(
+        gzip.compress(manifest.to_json().encode("utf-8")), "application/json"
+    )
 
 
 def _publish(plan: UploadPlan) -> None:
@@ -211,6 +219,44 @@ def write_objs(
     _publish(plan)
 
     return
+
+
+def gc_versioned_blobs(
+    grace_hours: int = GC_GRACE_HOURS, dry_run: bool = False
+) -> Dict[str, Any]:
+    bucket = _bucket()
+    manifest = read_manifest()
+    referenced = set(manifest.blobs.values()) if manifest else set()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=grace_hours)
+
+    scanned = 0
+    kept = 0
+    freed = 0
+    stale: List[Any] = []
+    for blob in bucket.list_blobs(prefix=f"{VERSION_PREFIX}/"):
+        scanned += 1
+        created = blob.time_created
+        if blob.name in referenced or (created is not None and created > cutoff):
+            kept += 1
+            continue
+        stale.append(blob)
+        freed += blob.size or 0
+
+    if not dry_run:
+        for i in range(0, len(stale), GC_BATCH_SIZE):
+            bucket.delete_blobs(stale[i : i + GC_BATCH_SIZE])
+
+    print(
+        f"GC {VERSION_PREFIX}/: scanned {scanned}, kept {kept}, "
+        f"deleted {len(stale)}{' (dry run)' if dry_run else ''}, freed {freed} bytes"
+    )
+    return {
+        "scanned": scanned,
+        "kept": kept,
+        "deleted": len(stale),
+        "bytes_freed": freed,
+        "dry_run": dry_run,
+    }
 
 
 def upload_historical(logical_path: str, data: Any, bucket: Any = None) -> bool:
