@@ -3,7 +3,7 @@ from copy import deepcopy
 import traceback
 from typing import Dict, List, Optional, Tuple
 
-from src.constants import CURR_YEAR, DISABLE_GCS
+from src.constants import CURR_YEAR, DISABLE_DB, DISABLE_GCS
 from src.data.avg import process_year as process_year_avg
 from src.data.epa.main import (
     post_process as post_process_epa,
@@ -27,13 +27,13 @@ from src.data.wins import (
     process_year as process_year_wins,
     winrate,
 )
-from src.db.main import clean_db
-from src.db.models import Team, TeamYear
-from src.db.read import (
+from src.data.backend import (
     get_team_events as get_team_events_db,
     get_team_years as get_team_years_db,
     get_teams as get_teams_db,
 )
+from src.db.main import clean_db
+from src.db.models import Team, TeamYear
 from src.db.write.main import (
     update_team_events as update_team_events_db,
     update_team_years as update_team_years_db,
@@ -42,6 +42,10 @@ from src.db.write.main import (
 from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import write_objs as write_objs_storage
+
+# Set true when a db-less cross-season EPA seed found no prior-year data (a
+# partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
+db_less_seed_incomplete = False
 
 
 def process_year(
@@ -64,6 +68,14 @@ def process_year(
                     all_team_years[ty.year][ty.team] = ty
         except Exception:
             traceback.print_exc()
+        if DISABLE_DB and year_num > 2002 and not all_team_years:
+            global db_less_seed_incomplete
+            db_less_seed_incomplete = True
+            print(
+                "WARNING: db-less mode found no prior-year team_years for "
+                f"{year_num}; every team will regress to the rookie mean. Back-fill "
+                "prior years to Parquet BEFORE running db-less or EPA seeds are wrong."
+            )
 
     new_teams, objs = process_year_tba(year_num, teams, objs, tba_partial, cache)
     teams += new_teams
@@ -88,19 +100,23 @@ def process_year(
         write_objs_storage(objs, orig_objs if partial else None, teams, parquet_uploads)
         timer.print(str(year_num) + " Write Storage")
 
-        try:
-            db_orig = read_objs_db(year_num) if partial else None
-            write_objs_db(year_num, objs, db_orig, not partial)
-        except Exception:
-            traceback.print_exc()
-        timer.print(str(year_num) + " Write DB")
-    else:
+        if not DISABLE_DB:
+            try:
+                db_orig = read_objs_db(year_num) if partial else None
+                write_objs_db(year_num, objs, db_orig, not partial)
+            except Exception:
+                traceback.print_exc()
+            timer.print(str(year_num) + " Write DB")
+    elif not DISABLE_DB:
         write_objs_db(year_num, objs, orig_objs if partial else None, not partial)
         timer.print(str(year_num) + " Write DB")
 
-        if not DISABLE_GCS:
-            write_parquet(year_num, objs, teams)
-            timer.print(str(year_num) + " Write Parquet")
+    # Current-year parquet is folded into the site manifest above; historical years
+    # publish parquet on their own manifest write (independent of the DB, so db-less
+    # backfill still produces parquet).
+    if not curr_year_gcs and not DISABLE_GCS:
+        write_parquet(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Parquet")
 
     return teams
 
@@ -122,11 +138,12 @@ def post_process(
     teams = post_process_epa(teams, all_team_years)
     timer.print("Post EPA")
 
-    update_teams_db(teams)
-    timer.print("Update DB")
+    if not DISABLE_DB:
+        update_teams_db(teams)
+        timer.print("Update DB")
 
-    post_process_tba()  # updates DB directly
-    timer.print("Post TBA")
+        post_process_tba()  # updates DB directly
+        timer.print("Post TBA")
 
 
 def reset_all_years():
@@ -135,8 +152,9 @@ def reset_all_years():
     start_year = 2002
     end_year = CURR_YEAR
 
-    clean_db()
-    timer.print("Clean DB")
+    if not DISABLE_DB:
+        clean_db()
+        timer.print("Clean DB")
 
     teams = load_teams_tba(cache=True)
     timer.print("Load Teams")
@@ -168,14 +186,19 @@ def update_curr_year(partial: bool, tba_partial: bool):
             timer.print("Read Snapshot")
 
     if objs is None or teams is None:
-        teams = get_teams_db()
-        timer.print("Load Teams")
-        if partial:
-            objs = read_objs_db(year)
-            timer.print("Read Objs")
-        else:
+        if DISABLE_DB:
+            teams = load_teams_tba(cache=True)
             objs = create_objs(year)
-            timer.print("Create Objs")
+            timer.print("Load Teams (TBA)")
+        else:
+            teams = get_teams_db()
+            timer.print("Load Teams")
+            if partial:
+                objs = read_objs_db(year)
+                timer.print("Read Objs")
+            else:
+                objs = create_objs(year)
+                timer.print("Create Objs")
 
     teams = process_year(
         year, partial, tba_partial, year < CURR_YEAR, teams, objs, None
@@ -188,6 +211,9 @@ def update_curr_year(partial: bool, tba_partial: bool):
 
 def refresh_teams() -> Dict[str, int]:
     """Refresh all stale team fields from TBA and recompute win records."""
+    if DISABLE_DB:
+        return {"teams_updated": 0}
+
     timer = Timer()
 
     fresh_teams = load_teams_tba(cache=False)

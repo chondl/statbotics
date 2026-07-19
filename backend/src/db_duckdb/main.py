@@ -3,12 +3,16 @@ import shutil
 import tempfile
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import duckdb
 
+from src.constants import CURR_YEAR
 from src.db.models.main import Model, ModelORM
+from src.db.models.match import Match
 from src.db_duckdb.schema import PARQUET_PREFIX, SPECS, columns, from_row
+from src.types.enums import EventType, MatchStatus
 
 SYNC_TTL = float(os.environ.get("DUCKDB_SYNC_TTL", "30"))
 
@@ -140,7 +144,12 @@ def _query(
         sql += f" OFFSET {int(offset)}"
 
     cursor = _connection().cursor()
-    cursor.execute(sql, params)
+    try:
+        cursor.execute(sql, params)
+    except duckdb.IOException as e:
+        if "No files found" in str(e):
+            return []
+        raise
     names = [d[0] for d in cursor.description]
     return [
         from_row(model_cls, cols, dict(zip(names, row))) for row in cursor.fetchall()
@@ -395,3 +404,149 @@ def _eq(filters: Dict[str, Any]) -> Tuple[List[str], List[Any]]:
             where.append(f'"{name}" = ?')
             params.append(value)
     return where, params
+
+
+def _event_filters(
+    country: Optional[str], state: Optional[str], district: Optional[str]
+) -> Tuple[List[str], List[Any]]:
+    where: List[str] = []
+    params: List[Any] = []
+    if country is not None:
+        where.append("e.country = ?")
+        params.append(country)
+    if state is not None:
+        where.append("e.state = ?")
+        params.append(state)
+    if district == "regionals":
+        where.append("e.district IS NULL")
+    elif district is not None:
+        where.append("e.district = ?")
+        params.append(district)
+    return where, params
+
+
+def _joined_matches(
+    base: str, year: int, where: List[str], params: List[Any], order: str, limit: int
+) -> List[Model]:
+    model, orm = SPECS["matches"]
+    cols = columns(orm)
+    sql = (
+        f"SELECT m.* FROM {_source(base, 'matches', year)} AS m "
+        f"JOIN {_source(base, 'events', year)} AS e ON m.event = e.key "
+        f"WHERE {' AND '.join(where)} ORDER BY {order} LIMIT {int(limit)}"
+    )
+    cursor = _connection().cursor()
+    cursor.execute(sql, params)
+    names = [d[0] for d in cursor.description]
+    return [from_row(model, cols, dict(zip(names, row))) for row in cursor.fetchall()]
+
+
+def get_noteworthy_matches(
+    year: int,
+    country: Optional[str],
+    state: Optional[str],
+    district: Optional[str],
+    elim: Optional[bool],
+    week: Optional[int],
+) -> Dict[str, List[Match]]:
+    where = ["m.year = ?", "m.status = ?", "e.type != ?"]
+    params: List[Any] = [year, MatchStatus.COMPLETED.value, EventType.OFFSEASON.value]
+    e_where, e_params = _event_filters(country, state, district)
+    where += e_where
+    params += e_params
+    if elim is not None:
+        where.append("m.elim = ?")
+        params.append(elim)
+    if week is not None:
+        where.append("e.week = ?")
+        params.append(week)
+
+    red = "m.red_score" if year < 2016 else "m.red_no_foul"
+    blue = "m.blue_score" if year < 2016 else "m.blue_no_foul"
+
+    base = _sync()
+
+    def top(order: str) -> List[Match]:
+        return _joined_matches(base, year, where, params, order, 30)  # type: ignore
+
+    out: Dict[str, List[Match]] = {
+        "high_score": top(f"greatest({red}, {blue}) DESC, m.time ASC"),
+        "combined_score": top(f"({red} + {blue}) DESC, m.time ASC"),
+        "losing_score": top("least(m.red_score, m.blue_score) DESC, m.time ASC"),
+    }
+    if year >= 2016:
+        out["high_auto_score"] = top(
+            "greatest(m.red_auto, m.blue_auto) DESC, m.time ASC"
+        )
+        out["high_teleop_score"] = top(
+            "greatest(m.red_teleop, m.blue_teleop) DESC, m.time ASC"
+        )
+        out["high_endgame_score"] = top(
+            "greatest(m.red_endgame, m.blue_endgame) DESC, m.time ASC"
+        )
+    return out
+
+
+def get_upcoming_matches(
+    country: Optional[str],
+    state: Optional[str],
+    district: Optional[str],
+    elim: Optional[bool],
+    minutes: int,
+    limit: int,
+    metric: str,
+) -> List[Tuple[Match, str]]:
+    curr_timestamp = int(datetime.now().timestamp()) - 60 * 5
+    if minutes == -1:
+        minutes = 60 * 24 * 7
+
+    where = [
+        "m.year = ?",
+        "m.status = ?",
+        "m.predicted_time > ?",
+        "m.predicted_time < ?",
+        "m.event = e.key",
+    ]
+    params: List[Any] = [
+        CURR_YEAR,
+        MatchStatus.UPCOMING.value,
+        curr_timestamp,
+        curr_timestamp + 60 * minutes,
+    ]
+    e_where, e_params = _event_filters(country, state, district)
+    where += e_where
+    params += e_params
+    if elim is not None:
+        where.append("m.elim = ?")
+        params.append(elim)
+
+    exprs = {
+        "max_epa": "greatest(m.epa_red_score_pred, m.epa_blue_score_pred)",
+        "sum_epa": "(m.epa_red_score_pred + m.epa_blue_score_pred)",
+        "diff_epa": "abs(m.epa_red_score_pred - m.epa_blue_score_pred)",
+        "time": "m.time",
+    }
+    order = ""
+    if metric in ("max_epa", "sum_epa"):
+        order = f" ORDER BY {exprs[metric]} DESC"
+    elif metric in ("time", "diff_epa"):
+        order = f" ORDER BY {exprs[metric]} ASC"
+
+    model, orm = SPECS["matches"]
+    cols = columns(orm)
+    base = _sync()
+    sql = (
+        f"SELECT m.*, e.name AS event_name FROM {_source(base, 'matches', CURR_YEAR)} "
+        f"AS m, {_source(base, 'events', CURR_YEAR)} AS e "
+        f"WHERE {' AND '.join(where)}{order} LIMIT {int(limit)}"
+    )
+    cursor = _connection().cursor()
+    cursor.execute(sql, params)
+    names = [d[0] for d in cursor.description]
+    return [
+        (
+            from_row(model, cols, dict(zip(names, row))),
+            dict(zip(names, row))["event_name"],
+        )
+        for row in cursor.fetchall()
+    ]
