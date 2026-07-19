@@ -14,7 +14,11 @@ CRDB_USER = os.getenv("CRDB_USER", "")
 CRDB_PWD = os.getenv("CRDB_PWD", "")
 CRDB_HOST = os.getenv("CRDB_HOST", "")
 
-CONN_STR = (
+# DATABASE_URL, if set, overrides the CockroachDB connection string entirely.
+# Used to run the backend against plain PostgreSQL (e.g. Cloud SQL staging),
+# e.g. "postgresql+psycopg2://user:pwd@host:5432/statbotics3". The transaction
+# helper (src/db/transaction.py) selects retry behavior from the engine dialect.
+CONN_STR = os.getenv("DATABASE_URL") or (
     (
         "cockroachdb://"
         + CRDB_USER

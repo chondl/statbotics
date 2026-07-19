@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from sqlalchemy import Boolean, Enum, Float, Integer, JSON, String
+from sqlalchemy import BigInteger, Boolean, Enum, Float, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import ForeignKeyConstraint, PrimaryKeyConstraint
 
@@ -35,8 +35,12 @@ class MatchORM(Base, ModelORM):
     set_number: MI = mapped_column(Integer)
     match_number: MI = mapped_column(Integer)
 
-    time: MI = mapped_column(Integer)  # Enforces ordering
-    predicted_time: MOI = mapped_column(Integer, nullable=True)  # For display
+    # BigInteger: Unix timestamps. TBA returns a ~1900 placeholder
+    # (-2,208,988,800) for matches with unknown time, which underflows Postgres
+    # int32; CockroachDB INT is 64-bit so this never surfaced in prod. BigInteger
+    # matches that width and is also future-proof past the 2038 int32 limit.
+    time: MI = mapped_column(BigInteger)  # Enforces ordering
+    predicted_time: MOI = mapped_column(BigInteger, nullable=True)  # For display
 
     status: Mapped[MatchStatus] = mapped_column(
         Enum(MatchStatus, values_callable=values_callable)

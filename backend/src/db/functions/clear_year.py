@@ -1,5 +1,4 @@
 from sqlalchemy.orm import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.db.main import Session
 from src.db.models.etag import ETagORM
@@ -8,6 +7,7 @@ from src.db.models.match import MatchORM
 from src.db.models.team_event import TeamEventORM
 from src.db.models.team_year import TeamYearORM
 from src.db.models.year import YearORM
+from src.db.transaction import run_transaction
 
 
 def clear_year(year: int) -> None:

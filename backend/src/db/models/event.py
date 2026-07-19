@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from sqlalchemy import Enum, Float, Integer, String
+from sqlalchemy import BigInteger, Enum, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.schema import ForeignKeyConstraint, PrimaryKeyConstraint
 
@@ -23,7 +23,7 @@ class EventORM(Base, ModelORM):
 
     """GENERAL"""
     name: MS = mapped_column(String(100))
-    time: MI = mapped_column(Integer)
+    time: MI = mapped_column(BigInteger)  # Unix timestamp; see match.py note
     country: MOS = mapped_column(String(30), nullable=True)
     state: MOS = mapped_column(String(10), nullable=True)
     district: MOS = mapped_column(String(10), nullable=True)

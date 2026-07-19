@@ -3,12 +3,12 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.constants import CURR_YEAR
 from src.db.main import Session
 from src.db.models.event import EventORM
 from src.db.models.match import Match, MatchORM
+from src.db.transaction import run_transaction
 from src.types.enums import EventStatus
 
 

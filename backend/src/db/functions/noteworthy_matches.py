@@ -2,11 +2,11 @@ from typing import Dict, List, Optional
 
 from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session as SessionType
-from sqlalchemy_cockroachdb import run_transaction  # type: ignore
 
 from src.db.main import Session
 from src.db.models.event import EventORM
 from src.db.models.match import Match, MatchORM
+from src.db.transaction import run_transaction
 from src.types.enums import MatchStatus
 
 
