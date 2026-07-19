@@ -13,6 +13,23 @@ Statbotics is an open-source data analytics platform for the FIRST Robotics Comp
 | `backend/` | FastAPI server: fetches data from TBA, computes EPA, serves REST + site APIs | See `backend/CLAUDE.md` |
 | `frontend/` | Next.js 13 frontend — the active, deployed website | See `frontend/CLAUDE.md` |
 
+## Two branches: `cph-master` (this one) and `cph-staging`
+
+This fork keeps two lines of work:
+
+- **`cph-master`** (this branch) — a minimal set of bug fixes tracking upstream
+  `master`, the source of PRs opened back to the upstream maintainer. Keep it
+  small and close to upstream; no fork-only architecture or docs here.
+- **`cph-staging`** — the deployed fork that runs the live mirror
+  (statbotics.iterativerefinement.com): performance re-architecture
+  (Postgres/Cloud SQL + DuckDB-over-Parquet, one Cloud Run container), offseason
+  support, the freshness ping, and **all** operational documentation (`docs/`,
+  deploy process, mirror ops, how EPA/data refresh).
+
+**For anything touching production or the mirror — deploying, rebuilding data, or
+diagnosing live behavior — switch to `cph-staging` and follow its docs there. Do
+not deploy from `cph-master`.**
+
 ## Working Style
 
 - **Ask before implementing.** When diagnosing a bug or unexpected behavior, ask clarifying questions before proposing or making a fix. Don't assume the most obvious explanation is correct — there may be intentional design reasons or missing context. Investigate first, present findings, then ask what the right fix is.
