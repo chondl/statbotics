@@ -13,27 +13,18 @@ Statbotics is an open-source data analytics platform for the FIRST Robotics Comp
 | `backend/` | FastAPI server: fetches data from TBA, computes EPA, serves REST + site APIs | See `backend/CLAUDE.md` |
 | `frontend/` | Next.js 13 frontend — the active, deployed website | See `frontend/CLAUDE.md` |
 
-## Deploying & operating the staging mirror
+## Production runs on the `staging` branch
 
-This fork is deployed as a live mirror at **statbotics.iterativerefinement.com**.
+This fork is deployed as a live mirror at **statbotics.iterativerefinement.com**,
+and **what runs in production is the `staging` branch, not `master`.** `master`
+tracks the upstream base codebase (minimal fixes); `staging` carries the live
+architecture (Postgres/Cloud SQL + DuckDB-over-Parquet, offseason support, the
+read-triggered freshness ping) and **all** operational documentation — the deploy
+process and Makefile, mirror ops, and how EPA/data refresh.
 
-> **STOP — before ANY deploy or data rebuild, you MUST read
-> [`docs/superpowers/rig/deploy/DEPLOY.md`](docs/superpowers/rig/deploy/DEPLOY.md)
-> and use the [`Makefile`](docs/superpowers/rig/deploy/Makefile) beside it.** Do
-> not hand-roll `gcloud`/Cloud Build commands — the Makefile targets (`make ship`,
-> `make reprocess-curr-year`, `make reprocess-year YEAR=…`, `make smoke`, …) are
-> the source of truth. Re-deriving these from scratch has burned time before;
-> the docs exist so you don't.
-
-- **Typical workflow is autonomous:** build the feature, deploy it, and verify it
-  in production **without asking the user for permission**. Shipping to the mirror
-  is expected, not an escalation.
-- **You own correctness in production.** After deploying, adequately test the
-  feature against the live mirror (API + a real browser load where relevant) —
-  deploying the revision is not "done"; observing the feature work is.
-- **Work a pre-deploy checklist every time.** Create the checklist from
-  DEPLOY.md §2 as todos and complete each item, recording evidence, before
-  calling a deploy finished.
+**For any work touching production or the mirror — deploying, rebuilding data, or
+diagnosing live behavior — switch to the `staging` branch and follow its docs
+there. Do not deploy from `master`.**
 
 ## Working Style
 
