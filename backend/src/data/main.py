@@ -1,5 +1,6 @@
 from collections import defaultdict
 from copy import deepcopy
+import traceback
 from typing import Dict, List, Optional, Tuple
 
 from src.constants import CURR_YEAR, DISABLE_GCS
@@ -38,6 +39,7 @@ from src.db.write.main import (
     update_team_years as update_team_years_db,
     update_teams as update_teams_db,
 )
+from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import write_objs as write_objs_storage
 
 
@@ -51,13 +53,16 @@ def process_year(
     all_team_years: Optional[Dict[int, Dict[int, TeamYear]]],
 ) -> List[Team]:
     timer = Timer()
+    curr_year_gcs = year_num == CURR_YEAR and not DISABLE_GCS
     orig_objs = deepcopy(objs)
     if all_team_years is None:
         all_team_years = defaultdict(dict)
-        for year in range(max(2002, year_num - 4), year_num):
-            team_years = get_team_years_db(year=year)
-            for ty in team_years:
-                all_team_years[ty.year][ty.team] = ty
+        try:
+            for year in range(max(2002, year_num - 4), year_num):
+                for ty in get_team_years_db(year=year):
+                    all_team_years[ty.year][ty.team] = ty
+        except Exception:
+            traceback.print_exc()
 
     new_teams, objs = process_year_tba(year_num, teams, objs, tba_partial, cache)
     teams += new_teams
@@ -74,12 +79,22 @@ def process_year(
     objs = process_year_epa(objs, all_team_years)
     timer.print(str(year_num) + " EPA")
 
-    write_objs_db(year_num, objs, orig_objs if partial else None, not partial)
-    timer.print(str(year_num) + " Write DB")
+    if curr_year_gcs:
+        write_snapshot(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Snapshot")
 
-    if year_num == CURR_YEAR and not DISABLE_GCS:
-        write_objs_storage(objs, orig_objs if partial else None)
+        write_objs_storage(objs, orig_objs if partial else None, teams)
         timer.print(str(year_num) + " Write Storage")
+
+        try:
+            db_orig = read_objs_db(year_num) if partial else None
+            write_objs_db(year_num, objs, db_orig, not partial)
+        except Exception:
+            traceback.print_exc()
+        timer.print(str(year_num) + " Write DB")
+    else:
+        write_objs_db(year_num, objs, orig_objs if partial else None, not partial)
+        timer.print(str(year_num) + " Write DB")
 
     return teams
 
@@ -138,15 +153,23 @@ def update_curr_year(partial: bool, tba_partial: bool):
     year = CURR_YEAR
     timer = Timer()
 
-    teams = get_teams_db()
-    timer.print("Load Teams")
+    objs: Optional[objs_type] = None
+    teams: Optional[List[Team]] = None
+    if partial and not DISABLE_GCS:
+        loaded = read_snapshot(year)
+        if loaded is not None:
+            objs, teams = loaded
+            timer.print("Read Snapshot")
 
-    if partial:
-        objs: objs_type = read_objs_db(year)
-        timer.print("Read Objs")
-    else:
-        objs = create_objs(year)
-        timer.print("Create Objs")
+    if objs is None or teams is None:
+        teams = get_teams_db()
+        timer.print("Load Teams")
+        if partial:
+            objs = read_objs_db(year)
+            timer.print("Read Objs")
+        else:
+            objs = create_objs(year)
+            timer.print("Create Objs")
 
     teams = process_year(
         year, partial, tba_partial, year < CURR_YEAR, teams, objs, None
