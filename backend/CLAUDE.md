@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working in the `backend/` directory.
 
-> **This is the `staging` branch — what runs in production (the mirror).**
-> Its architecture differs from upstream `master`: Postgres/Cloud SQL +
-> DuckDB-over-Parquet serving in a single Cloud Run container, plus offseason
+> **This is the `cph-staging` branch — what runs in production (the mirror).**
+> Its architecture differs from the `cph-master`/upstream line: Postgres/Cloud SQL
+> + DuckDB-over-Parquet serving in a single Cloud Run container, plus offseason
 > support and a read-triggered freshness ping. The **Router Structure** and
-> **Database** sections below still describe the older `master` architecture
+> **Database** sections below still describe the older `cph-master` architecture
 > (CockroachDB, split services) and are being reconciled — for how and *when*
 > EPA recomputes and data refreshes in production, read
 > [`docs/superpowers/rig/DATA-REFRESH.md`](../docs/superpowers/rig/DATA-REFRESH.md).

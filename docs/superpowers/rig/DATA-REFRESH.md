@@ -1,9 +1,10 @@
 # Data refresh & EPA computation — how and when
 
 **Authoritative reference for one question: how does the mirror recompute EPA and
-re-ingest TBA data, and what triggers it?** This describes the `staging` branch,
-which is **what production runs** — not local `master`, which lacks both the ping
-and the DuckDB/Parquet serving stack (see [§7](#7-master-vs-staging)).
+re-ingest TBA data, and what triggers it?** This describes the `cph-staging`
+branch, which is **what production runs** — not `cph-master` (the minimal
+upstream-fix line), which lacks both the ping and the DuckDB/Parquet serving stack
+(see [§7](#7-cph-master-vs-cph-staging)).
 
 Verified live against `statbotics-staging` on 2026-07-17 (scheduler config, ping
 endpoint, `/info`).
@@ -154,10 +155,10 @@ automatic:
   matches within minutes by running this same probe at a high scheduler frequency
   in-season. The mirror stays hourly and leans on the ping instead.
 
-## 7. `master` vs `staging`
+## 7. `cph-master` vs `cph-staging`
 
-`master` (and this local checkout) describes an **older architecture**:
+`cph-master` (the minimal upstream-fix line) describes an **older architecture**:
 CockroachDB, three separate App Engine services, no ping. **Production runs
-`staging`**: Postgres/Cloud SQL + DuckDB-over-Parquet serving in one Cloud Run
+`cph-staging`**: Postgres/Cloud SQL + DuckDB-over-Parquet serving in one Cloud Run
 container, the ping, and the offseason freeze. When reasoning about live
-behavior, read `staging`. See [STAGING.md](STAGING.md) and [DEPLOY.md](deploy/DEPLOY.md).
+behavior, read `cph-staging`. See [STAGING.md](STAGING.md) and [DEPLOY.md](deploy/DEPLOY.md).

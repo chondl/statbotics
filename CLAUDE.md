@@ -16,7 +16,8 @@ Statbotics is an open-source data analytics platform for the FIRST Robotics Comp
 ## Deploying & operating the staging mirror
 
 This fork is deployed as a live mirror at **statbotics.iterativerefinement.com**.
-Production runs the **`staging`** branch, not `master`. For how and when the mirror
+**You are on `cph-staging` — the fork branch that runs production** (the mirror);
+the minimal upstream-fix line is `cph-master`. For how and when the mirror
 recomputes EPA and re-ingests TBA data (the hourly cron + read-triggered ping),
 see [`docs/superpowers/rig/DATA-REFRESH.md`](docs/superpowers/rig/DATA-REFRESH.md).
 
