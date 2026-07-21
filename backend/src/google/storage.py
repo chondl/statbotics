@@ -2,12 +2,12 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
-import json
 import os
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 import zlib
 
 from google.cloud import storage
+import orjson
 
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
 from src.data.backend import (
@@ -46,13 +46,14 @@ GC_BATCH_SIZE = 100
 
 
 def compress(data: Any) -> bytes:
-    # start = datetime.now()
-    json_bytes = json.dumps(data).encode("utf-8")
-    compressed = zlib.compress(json_bytes)
-    # print(
-    #     f"Compressed data from {len(json_bytes)} to {len(compressed)} bytes in {datetime.now() - start}"
-    # )
-    return compressed
+    # orjson for speed; OPT_NON_STR_KEYS coerces int dict keys (e.g. the
+    # team_to_events blob) to strings exactly as stdlib json does. Wire format
+    # is unchanged: zlib-compressed JSON with no Content-Encoding, decoded by
+    # pako.inflate + JSON.parse on the frontend. Note orjson serializes NaN as
+    # null (stdlib's NaN literal would break JSON.parse anyway), so site-blob
+    # data must never contain NaN.
+    json_bytes = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
+    return zlib.compress(json_bytes)
 
 
 def _bucket() -> Any:
