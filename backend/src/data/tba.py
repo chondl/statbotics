@@ -42,12 +42,11 @@ HELPER FUNCTIONS
 def in_event_window(start_date: str, end_date: str, today: str) -> bool:
     """Active-tier membership: start−1d <= today <= end+3d. Dates stay naive
     UTC-less date strings compared lexically, exactly like the pre-tier code."""
-    start = (
-        datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)
-    ).strftime("%Y-%m-%d")
+    start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)).strftime(
+        "%Y-%m-%d"
+    )
     end = (
-        datetime.strptime(end_date, "%Y-%m-%d")
-        + timedelta(days=EVENT_END_GRACE_DAYS)
+        datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=EVENT_END_GRACE_DAYS)
     ).strftime("%Y-%m-%d")
     return start <= today <= end
 
