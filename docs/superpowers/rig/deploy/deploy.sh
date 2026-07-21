@@ -253,6 +253,18 @@ step_scheduler() {
     --attempt-deadline=1800s \
     --description="Daily TBA historical revalidation sweep (one year, serial; reprocess on change)" \
     2>/dev/null || true
+  # Daily team-fields refresh (DB retirement Phase 1 item 4): re-syncs team
+  # names / rookie years / records from TBA (one uncached teams fetch) and
+  # persists — DB writes in DB mode, targeted artifact republish db-less.
+  # This job is the operating guarantee that no operator action is ever
+  # needed to keep team fields current. 06:30 UTC offsets it from the hourly
+  # update (on the hour), statbotics-gc (04:30), and the TBA sweep (05:30).
+  gc scheduler jobs create http statbotics-refresh-teams \
+    --location="$REGION" --schedule="30 6 * * *" \
+    --uri="$api_url/v3/data/refresh_teams" --http-method=GET \
+    --attempt-deadline=1800s \
+    --description="Daily refresh_teams (TBA team-field re-sync; republish db-less)" \
+    2>/dev/null || true
 }
 
 step_dns() {

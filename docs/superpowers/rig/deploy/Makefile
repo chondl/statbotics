@@ -44,6 +44,7 @@ API_CPU      ?= 2
 UPDATE_SCHED ?= statbotics-update
 GC_SCHED     ?= statbotics-gc
 TBA_SWEEP_SCHED ?= statbotics-tba-sweep
+REFRESH_TEAMS_SCHED ?= statbotics-refresh-teams
 
 # Build/deploy from the repository root checkout, which since 2026-07-20 IS the
 # `cph-staging` branch (the deployed fork line) — the former dedicated worktree
@@ -127,6 +128,10 @@ update-curr-year: ## Cheap incremental current-year update (etag pre-check, same
 tba-sweep: ## Manually run the daily TBA historical revalidation sweep (one round-robin year, serial conditional GETs; reprocesses the year in-request if anything changed — can take minutes)
 	curl -s --max-time 1800 -w '\nHTTP %{http_code}\n' "$(API_URL)/v3/data/revalidate_tba"
 
+.PHONY: refresh-teams
+refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync; DB writes in DB mode, targeted artifact republish db-less). Normally the statbotics-refresh-teams scheduler runs this at 06:30 UTC.
+	curl -s --max-time 1800 -w '\nHTTP %{http_code}\n' "$(API_URL)/v3/data/refresh_teams"
+
 # --------------------------- DATA: HISTORICAL YEAR ---------------------------
 # Targeted single-year reprocess as a Cloud Run JOB (jobs allow long timeouts;
 # the service HTTP path caps at 3600s). clear_year + process_year(partial=False)
@@ -187,15 +192,17 @@ backfill-blobs: require-YEAR ## Republish one year's hist/ site blobs from the D
 # Pause the hourly update + daily GC around a manual data rebuild so their
 # manifest writes cannot race the rebuild's.
 .PHONY: pause-cron resume-cron
-pause-cron: ## Pause the hourly update + daily GC + daily TBA sweep schedulers
+pause-cron: ## Pause the hourly update + daily GC + daily TBA sweep + daily refresh-teams schedulers
 	-$(GC) scheduler jobs pause $(UPDATE_SCHED) --location $(REGION)
 	-$(GC) scheduler jobs pause $(GC_SCHED) --location $(REGION)
 	-$(GC) scheduler jobs pause $(TBA_SWEEP_SCHED) --location $(REGION)
+	-$(GC) scheduler jobs pause $(REFRESH_TEAMS_SCHED) --location $(REGION)
 
 resume-cron: ## Resume the schedulers
 	-$(GC) scheduler jobs resume $(UPDATE_SCHED) --location $(REGION)
 	-$(GC) scheduler jobs resume $(GC_SCHED) --location $(REGION)
 	-$(GC) scheduler jobs resume $(TBA_SWEEP_SCHED) --location $(REGION)
+	-$(GC) scheduler jobs resume $(REFRESH_TEAMS_SCHED) --location $(REGION)
 
 # --------------------------------- VERIFY ------------------------------------
 .PHONY: smoke verify-event logs info
