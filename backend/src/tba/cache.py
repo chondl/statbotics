@@ -21,7 +21,7 @@ import os
 import re
 import tarfile
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set
 
 ARCHIVE_PREFIX = "tba-cache"
@@ -81,6 +81,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _parse_iso(ts: str) -> Optional[datetime]:
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 """
 MANIFEST (design §2.4, §3.3)
 """
@@ -89,6 +98,28 @@ MANIFEST (design §2.4, §3.3)
 def stored_etag(url: str) -> Optional[str]:
     entry = _manifest.get(url)
     return entry.get("etag") if entry is not None else None
+
+
+def validated_within(url: str, hours: float) -> bool:
+    """True when the manifest holds an entry for url whose last_validated is
+    within the last `hours` hours. Missing entry or unreadable timestamp
+    counts as NOT validated (revalidation is the safe direction)."""
+    entry = _manifest.get(url)
+    if entry is None:
+        return False
+    ts = _parse_iso(entry.get("last_validated", ""))
+    if ts is None:
+        return False
+    return datetime.now(timezone.utc) - ts < timedelta(hours=hours)
+
+
+def needs_revalidation(url: str, hours: float) -> bool:
+    """Daily-tier candidate check (design §2.3): True only when the manifest
+    HAS an entry for url and it has not been validated within `hours`. Paths
+    with no manifest state return False — the daily tier never adds requests
+    for paths it holds no etag state for (a cold manifest adds nothing;
+    populating it is the reset path's job)."""
+    return url in _manifest and not validated_within(url, hours)
 
 
 def record_success(url: str, etag: Optional[str]) -> None:
@@ -267,10 +298,12 @@ __all__: List[str] = [
     "archive_for",
     "extract_archive",
     "hydrate",
+    "needs_revalidation",
     "pack_archive",
     "persist",
     "record_not_modified",
     "record_success",
     "reset_state",
     "stored_etag",
+    "validated_within",
 ]
