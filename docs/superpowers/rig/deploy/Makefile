@@ -19,6 +19,10 @@
 #   make verify-event EVENT=2026iri
 #   make smoke
 
+# DANGER — never dry-run with `make -n` here: with .ONESHELL, any recipe that
+# mentions $(MAKE) (e.g. reprocess-year's resume-cron chain) is EXECUTED in
+# full even under -n. A `make -n reprocess-year YEAR=…` really runs the job.
+# (This bit us on 2026-07-21: an intended dry run cleared+reprocessed 2025.)
 SHELL := /bin/bash
 .ONESHELL:
 
@@ -39,6 +43,7 @@ API_MEMORY   ?= 8Gi
 API_CPU      ?= 2
 UPDATE_SCHED ?= statbotics-update
 GC_SCHED     ?= statbotics-gc
+TBA_SWEEP_SCHED ?= statbotics-tba-sweep
 
 # Build/deploy from the repository root checkout, which since 2026-07-20 IS the
 # `cph-staging` branch (the deployed fork line) — the former dedicated worktree
@@ -118,6 +123,10 @@ reprocess-curr-year: ## Full current-year recompute (re-ingests fresh from TBA; 
 update-curr-year: ## Cheap incremental current-year update (etag pre-check, same as the hourly cron)
 	curl -s --max-time 300 -w '\nHTTP %{http_code}\n' "$(API_URL)/v3/site/update_curr_year"
 
+.PHONY: tba-sweep
+tba-sweep: ## Manually run the daily TBA historical revalidation sweep (one round-robin year, serial conditional GETs; reprocesses the year in-request if anything changed — can take minutes)
+	curl -s --max-time 1800 -w '\nHTTP %{http_code}\n' "$(API_URL)/v3/data/revalidate_tba"
+
 # --------------------------- DATA: HISTORICAL YEAR ---------------------------
 # Targeted single-year reprocess as a Cloud Run JOB (jobs allow long timeouts;
 # the service HTTP path caps at 3600s). clear_year + process_year(partial=False)
@@ -139,14 +148,14 @@ JOB_NAME ?= statbotics-reprocess-$(YEAR)
 REPROCESS_DRIVER = import src.db.models, src.data.main as dm, backfill_blobs; from src.data.utils import create_objs; from src.data.tba import load_teams; from src.db.functions.clear_year import clear_year; t=load_teams(cache=True); clear_year($(YEAR)); dm.process_year($(YEAR), False, False, True, t, create_objs($(YEAR)), None); backfill_blobs.main(['$(YEAR)','--force']); print('REPROCESS_$(YEAR)_COMPLETE'); print('Chaining full current-year re-render (team blobs embed full history)...'); dm.update_curr_year(partial=False, tba_partial=False); dm.refresh_teams(); print('RESET_CURR_YEAR_CHAIN_COMPLETE')
 
 .PHONY: reprocess-year
-reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end, then chain a full current-year re-render. Usage: make reprocess-year YEAR=2025
+reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end, then chain a full current-year re-render. Usage: make reprocess-year YEAR=2025 [REFRESH_TBA=1 to bypass the TBA cache manifest]
 	@set -e; \
 	echo "Reprocessing $(YEAR) (clear + process + parquet + hist blobs) as a Cloud Run job..."; \
 	$(GC) run jobs delete $(JOB_NAME) --region $(REGION) --quiet 2>/dev/null || true; \
 	$(GC) run jobs create $(JOB_NAME) \
 	  --image $(IMAGE_API) --region $(REGION) \
 	  --set-cloudsql-instances $(CONN_NAME) \
-	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)|DATABASE_URL=$(DATABASE_URL)" \
+	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)|DATABASE_URL=$(DATABASE_URL)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))" \
 	  --set-secrets "TBA_AUTH_KEY=tba-auth-key:latest,PGPASSWORD=db-password:latest" \
 	  --command python --args "^@@@^-c@@@$(REPROCESS_DRIVER)" \
 	  --cpu 2 --memory $(API_MEMORY) --task-timeout 3600 --max-retries 0; \
@@ -178,13 +187,15 @@ backfill-blobs: require-YEAR ## Republish one year's hist/ site blobs from the D
 # Pause the hourly update + daily GC around a manual data rebuild so their
 # manifest writes cannot race the rebuild's.
 .PHONY: pause-cron resume-cron
-pause-cron: ## Pause the hourly update + daily GC schedulers
+pause-cron: ## Pause the hourly update + daily GC + daily TBA sweep schedulers
 	-$(GC) scheduler jobs pause $(UPDATE_SCHED) --location $(REGION)
 	-$(GC) scheduler jobs pause $(GC_SCHED) --location $(REGION)
+	-$(GC) scheduler jobs pause $(TBA_SWEEP_SCHED) --location $(REGION)
 
 resume-cron: ## Resume the schedulers
 	-$(GC) scheduler jobs resume $(UPDATE_SCHED) --location $(REGION)
 	-$(GC) scheduler jobs resume $(GC_SCHED) --location $(REGION)
+	-$(GC) scheduler jobs resume $(TBA_SWEEP_SCHED) --location $(REGION)
 
 # --------------------------------- VERIFY ------------------------------------
 .PHONY: smoke verify-event logs info
