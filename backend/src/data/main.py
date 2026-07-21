@@ -29,7 +29,7 @@ from src.db.write.main import update_team_years as update_team_years_db
 from src.db.write.main import update_teams as update_teams_db
 from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
-from src.google.storage import publish_team_artifacts
+from src.google.storage import publish_team_artifacts, write_hist_blobs
 from src.google.storage import write_objs as write_objs_storage
 from src.tba import cache as tba_cache
 from src.tba.clean_data import clean_district
@@ -155,10 +155,17 @@ def process_year(
 
     # Current-year parquet is folded into the site manifest above; historical years
     # publish parquet on their own manifest write (independent of the DB, so db-less
-    # backfill still produces parquet).
+    # backfill still produces parquet). Historical hist/ site blobs are emitted from
+    # the same pipeline objects (DB retirement Phase 3, replacing the DB-reading
+    # backfill_blobs.py): write-once within a HIST_EPOCH, so already-exported blobs
+    # are skipped and a reset_all_years/reprocess_year only fills gaps — bump
+    # HIST_EPOCH to force a full re-export.
     if not curr_year_gcs and not DISABLE_GCS:
         write_parquet(year_num, objs, teams)
         timer.print(str(year_num) + " Write Parquet")
+
+        write_hist_blobs(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Hist Blobs")
 
     # Re-pack + upload only dirty TBA cache archives now that the year's
     # outputs (snapshot / storage / parquet) are written. Never raises.
@@ -391,16 +398,19 @@ def _update_curr_year(partial: bool, tba_partial: bool):
 
 
 def reprocess_year(year_num: int) -> None:
-    """Full single-year historical reprocess for the daily TBA sweep
-    (design §2.3), mirroring the `reprocess-year` job driver in
-    docs/superpowers/rig/deploy/Makefile:
+    """Full single-year historical reprocess — the one driver for both the
+    daily TBA sweep (design §2.3) and the operator `reprocess-year` job in
+    docs/superpowers/rig/deploy/Makefile (whose REPROCESS_DRIVER calls this
+    function directly). Works in both modes; needs no DB db-less:
 
     - process_year(partial=False, cache=True): re-ingests the year from the
       freshly revalidated pickles (zero further TBA traffic for validated
       paths), recomputes EPA with the prior-4-year team_years seeding read
-      inside process_year (all_team_years=None), rewrites the year's DB rows
-      (write_objs clean=True clears first) and republishes its Parquet.
-    - backfill_blobs: republishes the year's hist/ site blobs from the DB.
+      inside process_year (all_team_years=None — DB, or Parquet via DuckDB
+      db-less), republishes the year's Parquet, emits its hist/ site blobs
+      from the pipeline objects (write_hist_blobs; write-once per
+      HIST_EPOCH), and in DB mode also rewrites the year's DB rows
+      (write_objs clean=True clears first).
     - Chained full current-year re-render: team/{num} site blobs embed each
       team's full-history team_years and the team-blob change gate skips
       them on partial cycles, so a historical reprocess MUST chain a full
@@ -413,12 +423,6 @@ def reprocess_year(year_num: int) -> None:
     teams = load_teams_tba(cache=True)
     process_year(year_num, False, False, True, teams, create_objs(year_num), None)
     timer.print(f"{year_num} Reprocess")
-
-    if not DISABLE_DB:
-        import backfill_blobs
-
-        backfill_blobs.main([str(year_num), "--force"])
-        timer.print(f"{year_num} Hist Blobs")
 
     update_curr_year(partial=False, tba_partial=False)
     refresh_teams()

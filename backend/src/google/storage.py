@@ -28,7 +28,7 @@ from src.google.publish import (
 from src.site.backend import get_noteworthy_matches, get_upcoming_matches
 from src.site.event import _read_all_events, _read_event, _read_events
 from src.site.match import _read_noteworthy_matches, _read_upcoming_matches
-from src.site.team import _read_all_teams, _read_team
+from src.site.team import _read_all_teams, _read_team, _read_team_year
 from src.site.team_year import _read_team_years
 
 # GCS bucket names are globally unique, so staging cannot reuse site_v1 /
@@ -420,3 +420,96 @@ def upload_historical(logical_path: str, data: Any, bucket: Any = None) -> bool:
     blob.cache_control = IMMUTABLE_CACHE
     blob.upload_from_string(compress(data), "application/octet-stream")
     return True
+
+
+def write_hist_blobs(year: int, objs: objs_type, teams: List[Team]) -> int:
+    """Render + upload one historical year's hist/{epoch}/ site blobs from
+    in-memory pipeline objects — the db-less replacement for the retired
+    backfill_blobs.py operator script (DB retirement Phase 3), rendering
+    exactly the object families it rendered, at the same paths:
+
+        team_years/{year}    _read_team_years
+        events/{year}        _read_events
+        event/{key}          _read_event      (one per event)
+        team/{num}/{year}    _read_team_year  (one per TeamYear with a
+                                               known team row)
+
+    Upload semantics are upload_historical's, unchanged: hist blobs are
+    immutable within a HIST_EPOCH — objects that already exist are left
+    alone. To force a full re-export (rendering or data changed for
+    already-exported blobs), bump HIST_EPOCH in src/constants.py and rerun.
+    The manifest is never touched here: its hist_epoch stamp is maintained
+    by every current-year publish (plan_uploads(hist_epoch=HIST_EPOCH)),
+    and hist objects are resolved by path, not through manifest.blobs.
+
+    Uploads are independent single objects, so they run through a thread
+    pool (the sequential exists+upload pairs dominated backfill_blobs.py's
+    wall time; the bucket client is thread-safe, as _publish already relies
+    on)."""
+    # Input lists in the objs dicts' natural order, mirroring how
+    # backfill_blobs consumed its DB reads: renderers that need a specific
+    # order sort internally (_read_events/_read_event by time); the rest are
+    # order-preserving, so payload bytes are a pure function of these lists.
+    year_obj = objs[0]
+    team_years = list(objs[1].values())
+    events = list(objs[2].values())
+    team_events = list(objs[3].values())
+    matches = list(objs[4].values())
+    teams_by_num = {t.team: t for t in teams}
+
+    matches_by_event: Dict[str, List[Any]] = defaultdict(list)
+    team_events_by_event: Dict[str, List[Any]] = defaultdict(list)
+    for m in matches:
+        matches_by_event[m.event].append(m)
+    for te in team_events:
+        team_events_by_event[te.event].append(te)
+
+    matches_by_team: Dict[int, List[Any]] = defaultdict(list)
+    for m in matches:
+        for num in set(m.get_red()) | set(m.get_blue()):
+            matches_by_team[num].append(m)
+    team_events_by_team: Dict[int, List[Any]] = defaultdict(list)
+    for te in team_events:
+        team_events_by_team[te.team].append(te)
+
+    payloads: List[Any] = [
+        (f"team_years/{year}", _read_team_years(year, year_obj, team_years)),
+        (f"events/{year}", _read_events(year_obj, events)),
+    ]
+    for event in events:
+        payloads.append(
+            (
+                f"event/{event.key}",
+                _read_event(
+                    year_obj,
+                    event,
+                    matches_by_event.get(event.key, []),
+                    team_events_by_event.get(event.key, []),
+                ),
+            )
+        )
+    for ty in team_years:
+        team_obj = teams_by_num.get(ty.team)
+        if team_obj is None:
+            continue
+        payloads.append(
+            (
+                f"team/{ty.team}/{year}",
+                _read_team_year(
+                    year_obj,
+                    team_obj,
+                    ty,
+                    team_events_by_team.get(ty.team, []),
+                    matches_by_team.get(ty.team, []),
+                ),
+            )
+        )
+
+    bucket = _bucket()
+    with ThreadPoolExecutor() as executor:
+        results = list(
+            executor.map(lambda p: upload_historical(p[0], p[1], bucket), payloads)
+        )
+    written = sum(1 for r in results if r)
+    print(f"hist blobs {year}: wrote {written}/{len(payloads)} (epoch {HIST_EPOCH})")
+    return written
