@@ -56,6 +56,7 @@ def process_year(
     teams: List[Team],
     objs: objs_type,
     all_team_years: Optional[Dict[int, Dict[int, TeamYear]]],
+    team_baseline_valid: bool = True,
 ) -> List[Team]:
     timer = Timer()
     curr_year_gcs = year_num == CURR_YEAR and not DISABLE_GCS
@@ -64,7 +65,18 @@ def process_year(
     # (process_year_tba today, or a future post-post_process teams publish)
     # mutates the teams list, so write_objs compares against true cycle-start
     # team rows. Partial cycles only, mirroring orig_objs below.
-    orig_teams = deepcopy(teams) if partial else None
+    #
+    # team_baseline_valid=False marks a partial cycle whose teams list did NOT
+    # come from the snapshot the published blobs were rendered from (snapshot
+    # read failed; teams reloaded from the DB/TBA). Those rows may already
+    # carry mutations (refresh_teams, post_process) made since the blobs were
+    # last rendered, so a baseline deepcopied from them would wrongly report
+    # "unchanged" for stale blobs. Pass orig_teams=None so write_objs renders
+    # every team. The EVENT gate keeps its orig_objs baseline on that path:
+    # fallback orig_objs comes from read_objs_db, the same cycle-start source
+    # the DB-mode event gate always used pre-snapshot, so it is valid — only
+    # team rows are mutated outside the objs write path.
+    orig_teams = deepcopy(teams) if partial and team_baseline_valid else None
     if all_team_years is None:
         all_team_years = defaultdict(dict)
         try:
@@ -186,10 +198,12 @@ def update_curr_year(partial: bool, tba_partial: bool):
 
     objs: Optional[objs_type] = None
     teams: Optional[List[Team]] = None
+    snapshot_loaded = False
     if partial and not DISABLE_GCS:
         loaded = read_snapshot(year)
         if loaded is not None:
             objs, teams = loaded
+            snapshot_loaded = True
             timer.print("Read Snapshot")
 
     if objs is None or teams is None:
@@ -207,8 +221,17 @@ def update_curr_year(partial: bool, tba_partial: bool):
                 objs = create_objs(year)
                 timer.print("Create Objs")
 
+    # On the snapshot-fallback path (partial but snapshot_loaded False), the
+    # team-row baseline is invalid — see process_year for the reasoning.
     teams = process_year(
-        year, partial, tba_partial, year < CURR_YEAR, teams, objs, None
+        year,
+        partial,
+        tba_partial,
+        year < CURR_YEAR,
+        teams,
+        objs,
+        None,
+        team_baseline_valid=snapshot_loaded,
     )
 
     if not partial:

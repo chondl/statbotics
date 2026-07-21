@@ -272,3 +272,19 @@ def test_partial_cycle_with_changed_team_row_renders_blob(monkeypatch):
     teams[1].name = "Citrus Circuits (renamed)"
     rec = run_write_objs(monkeypatch, objs, deepcopy(objs), teams, orig_teams, prev)
     assert team_keys(rec.rendered) == {"team/1678"}
+
+
+def test_partial_snapshot_fallback_renders_all_team_blobs(monkeypatch):
+    # Snapshot-fallback partial cycle: the snapshot read failed, so teams were
+    # reloaded from the DB and update_curr_year passes orig_teams=None (the
+    # DB rows are not a valid baseline — they may already carry refresh_teams
+    # / post_process mutations the published blobs predate). With orig_ty
+    # present but no team-row baseline, EVERY team blob must render; the event
+    # gate (orig_objs, validly reconstructed from the DB) still applies.
+    objs, teams = make_cycle()
+    full = run_write_objs(monkeypatch, objs, None, teams, None, None)
+    prev = full.plan.manifest
+
+    rec = run_write_objs(monkeypatch, objs, deepcopy(objs), teams, None, prev)
+    assert team_keys(rec.rendered) == {"team/254", "team/1678"}
+    assert event_keys(rec.rendered) == set()

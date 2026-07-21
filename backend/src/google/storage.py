@@ -143,14 +143,22 @@ def _team_render_set(
         # Full rebuild: no baseline, render every current-year team.
         return set(curr_ty)
 
+    # Candidates span orig teams too: a team whose current-year TeamYear was
+    # removed (e.g. TBA registration removal) must re-render to drop the year
+    # row.
+    candidates = set(curr_ty) | set(orig_ty)
+
+    if orig_teams_by_num is None:
+        # No team-row baseline (e.g. a partial cycle whose snapshot read
+        # failed and fell back to DB team rows): cannot prove any team row
+        # unchanged, so render every candidate.
+        return candidates
+
     render: Set[int] = set()
-    # Iterate orig teams too: a team whose current-year TeamYear was removed
-    # (e.g. TBA registration removal) must re-render to drop the year row.
-    for num in set(curr_ty) | set(orig_ty):
+    for num in candidates:
         if (
             f"team/{num}" not in prev_blobs  # never published
             or not nan_safe_eq(curr_ty.get(num), orig_ty.get(num))  # TY changed
-            or orig_teams_by_num is None  # no team-row baseline: render
             or not nan_safe_eq(
                 teams_by_num.get(num), orig_teams_by_num.get(num)
             )  # team row changed
