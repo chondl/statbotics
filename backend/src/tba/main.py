@@ -8,6 +8,9 @@ from src.tba.utils import dump_cache, load_cache
 
 read_prefix = "https://www.thebluealliance.com/api/v3/"
 
+# Local pickle-cache root. Resolved once at import; override via TBA_CACHE_DIR.
+TBA_CACHE_DIR = os.getenv("TBA_CACHE_DIR", "/tmp/tba-cache")
+
 # TBA_AUTH_KEY (from Secret Manager on staging) overrides the hardcoded public
 # key, keeping the real key out of source. Falls back to AUTH_KEY when unset.
 session = Session()
@@ -19,26 +22,25 @@ session.headers.update(
 def _get_tba(
     url: str, etag: Optional[str] = None
 ) -> Tuple[Union[Any, bool], Optional[str]]:
-    if etag is not None:
-        session.headers.update({"If-None-Match": etag})
-        response = session.get(read_prefix + url)
-        if response.status_code == 304:
-            return True, etag
-        elif response.status_code == 200:
-            return response.json(), response.headers.get("ETag")
-    else:
-        response = session.get(read_prefix + url)
-        if response.status_code == 200:
-            return response.json(), response.headers.get("ETag")
+    # Conditional headers are per-request: requests merges them with the
+    # session headers for this call only, so the shared session is never
+    # left carrying a stale If-None-Match.
+    headers = {} if etag is None else {"If-None-Match": etag}
+    response = session.get(read_prefix + url, headers=headers)
+    if etag is not None and response.status_code == 304:
+        return True, etag
+    if response.status_code == 200:
+        return response.json(), response.headers.get("ETag")
     return False, None
 
 
 def get_tba(
     url: str, etag: Optional[str] = None, cache: bool = True
 ) -> Tuple[Union[Any, bool], Optional[str]]:
-    if cache and os.path.exists("cache/" + url + "/data.p"):
+    cache_path = os.path.join(TBA_CACHE_DIR, url)
+    if cache and os.path.exists(cache_path + "/data.p"):
         # Cache Hit
-        return load_cache("cache/" + url), None
+        return load_cache(cache_path), None
 
     data, new_etag = _get_tba(url, etag)
 
@@ -47,5 +49,5 @@ def get_tba(
         return data, new_etag
 
     # Cache Miss
-    dump_cache("cache/" + url, data)
+    dump_cache(cache_path, data)
     return data, new_etag

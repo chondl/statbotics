@@ -129,6 +129,7 @@ def check_year_partial(
         if qual_matches == 0 or current_match < qual_matches:
             continue
 
+        prev_etag = etags_dict.get(event_obj.key + "/alliances", default_etag).etag
         _, new_etag = get_event_alliances_tba(event_obj.key, prev_etag, cache=False)
         if new_etag != prev_etag and new_etag is not None:
             return True  # If any event has new alliances, return True

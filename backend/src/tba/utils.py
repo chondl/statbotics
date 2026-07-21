@@ -24,8 +24,8 @@ def dump_cache(path: str, data: Any):
             os.makedirs(path)
         with open(path + "/data.p", "wb") as f:
             pickle.dump(data, f)
-    except OSError:
-        pass
+    except OSError as e:
+        print("WARNING: failed to write TBA cache at " + path + ": " + str(e))
 
 
 def load_cache(file: str):
