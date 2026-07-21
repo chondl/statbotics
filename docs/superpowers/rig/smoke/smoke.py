@@ -13,13 +13,17 @@ Point it at any environment via flags. Non-zero exit if any check fails.
 
 Checks:
   1. liveness            /  and /info  -> 200
-  2. db-backed reads     /v3/team/254 (team==254 + EPA fields),
-                         /v3/site/team_years/{year} (non-empty)
+  2. API reads           /v3/team/254 (team==254 + EPA fields),
+     (DuckDB-backed)     /v3/site/team_years/{year} (non-empty).
+                         Serving is DuckDB-over-Parquet in prod; the
+                         norm_epa.current check doubles as the canary for
+                         db-less Team post-processing (a wiped/stale teams
+                         publish nulls it — DB retirement design §1 Gap A).
   3. blob reads          teams/all, team_years/{year}, one event/{key}
                          (fetch, zlib-decompress, parse, non-trivial)
   4. consistency probe   a sampled team's EPA in an event/{key} BLOB matches
-                         the same team_event EPA from the DB-backed site API
-                         (regression guard for the stale-event-blob bug).
+                         the same team_event EPA from the DuckDB-backed site
+                         API (regression guard for the stale-event-blob bug).
                          Also: team_years BLOB epa == team_years API epa.
                          NB: static seasons have no "upcoming, no matches"
                          events, so event-epa == year-epa only holds for a
@@ -104,8 +108,8 @@ def main():
     check("GET /", lambda: _eq(http_json(a.base_url + "/"), {"Hello": "World"}))
     check("GET /info 200", lambda: _is(http_status(a.base_url + "/info"), 200))
 
-    # 2. db-backed reads
-    print("[2] db-backed reads")
+    # 2. API reads (DuckDB-over-Parquet serving in prod)
+    print("[2] API reads (DuckDB-backed)")
 
     def _team254():
         d = http_json(a.base_url + "/v3/team/254")
@@ -149,7 +153,7 @@ def main():
     check(f"blob event/{event_key}", _blob_event)
 
     # 4. consistency probe
-    print("[4] consistency probe (blob vs DB-backed API)")
+    print("[4] consistency probe (blob vs DuckDB-backed API)")
 
     def _event_consistency():
         blob = gcs_media(a.gcs, a.bucket, f"event/{event_key}")
