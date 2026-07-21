@@ -178,6 +178,7 @@ class PipelineHarness:
 
         # Current-year TBA ingest: one team_year + team_event for 254.
         def fake_process_year_tba(year_num, teams, objs, tba_partial, cache):
+            self.events.append("tba")
             objs[1][f"254_{year_num}"] = ty(
                 254,
                 year_num,
@@ -248,6 +249,9 @@ class PipelineHarness:
     def run_full_cycle(self):
         data_main.update_curr_year(partial=False, tba_partial=False)
 
+    def run_partial_cycle(self):
+        data_main.update_curr_year(partial=True, tba_partial=True)
+
     def published_teams(self) -> List[Team]:
         assert len(self.storage_calls) == 1
         return self.storage_calls[0]["teams"]
@@ -311,10 +315,12 @@ def test_full_cycle_db_mode_still_writes_db_and_publishes_last(monkeypatch):
     h.run_full_cycle()
 
     # DB writes are unchanged and the publish comes after every mutation.
+    # Within the publish: blobs/manifest first, snapshot last (gate-baseline
+    # invariant — the snapshot may only record already-published state).
     assert h.events.index("write_objs_db") < h.events.index("update_teams_db")
     assert h.events.index("update_teams_db") < h.events.index("post_process_tba")
-    assert h.events.index("post_process_tba") < h.events.index("snapshot")
-    assert h.events.index("snapshot") < h.events.index("storage")
+    assert h.events.index("post_process_tba") < h.events.index("storage")
+    assert h.events.index("storage") < h.events.index("snapshot")
 
     # update_teams_db received the post-processed rows.
     db_teams = {t.team: t for t in h.db_teams_written[0]}
@@ -358,6 +364,19 @@ def test_full_cycle_dbless_successful_publish_clears_skip_flag(monkeypatch):
     assert data_main.db_less_publish_skipped is False
 
 
+def test_full_cycle_dbless_storage_failure_leaves_snapshot_behind(monkeypatch):
+    # Same gate-baseline invariant in publish_curr_year: the snapshot it
+    # writes is the baseline the NEXT partial cycle diffs against, so a
+    # storage failure must leave it un-advanced.
+    import pytest
+
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    monkeypatch.setattr(data_main, "write_objs_storage", _raise)
+    with pytest.raises(RuntimeError):
+        h.run_full_cycle()
+    assert h.snapshot_calls == []
+
+
 def test_full_cycle_db_mode_team_years_failure_still_publishes(monkeypatch):
     # DB mode keeps current behavior: post_process is skipped but the publish
     # still runs — teams came from the DB with post-processed fields already
@@ -395,6 +414,78 @@ def test_duckdb_team_event_teams_empty_glob_raises(monkeypatch, tmp_path):
         duck.get_team_event_teams()
 
 
+# ------------ partial-cycle snapshot-miss guard (db-less clobber) -------------
+
+
+def test_partial_cycle_dbless_snapshot_miss_skips_cycle(monkeypatch):
+    # Db-less, a partial cycle whose snapshot read fails must SKIP the cycle
+    # entirely: the fallback objs would be EMPTY (create_objs), and the TBA
+    # tier logic skips out-of-window completed events with fresh manifest
+    # validations — so the cycle would publish near-empty objs over good
+    # snapshot/blobs/Parquet. Nothing processed, nothing written.
+    h = PipelineHarness(monkeypatch, disable_db=True)  # read_snapshot -> None
+    monkeypatch.setattr(data_main, "db_less_partial_skipped", False)
+    h.run_partial_cycle()
+
+    assert "tba" not in h.events  # no TBA processing at all
+    assert h.snapshot_calls == []  # fake GCS untouched
+    assert h.storage_calls == []
+    assert "write_objs_db" not in h.events
+    # Degradation is loud: surfaced via /info DB_LESS_PARTIAL_SKIPPED.
+    assert data_main.db_less_partial_skipped is True
+
+
+def test_partial_cycle_dbless_snapshot_hit_runs_and_clears_flag(monkeypatch):
+    # The next successful snapshot read resumes normal operation and clears
+    # the skip flag.
+    from src.data.utils import create_objs
+
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    snap = (create_objs(YEAR), deepcopy(h.start_teams))
+    monkeypatch.setattr(data_main, "read_snapshot", lambda year: deepcopy(snap))
+    monkeypatch.setattr(data_main, "db_less_partial_skipped", True)
+    h.run_partial_cycle()
+
+    assert "tba" in h.events
+    assert len(h.snapshot_calls) == 1
+    assert len(h.storage_calls) == 1
+    assert data_main.db_less_partial_skipped is False
+    # Blobs/manifest first, snapshot last (gate-baseline invariant).
+    assert h.events.index("storage") < h.events.index("snapshot")
+
+
+def test_partial_cycle_dbless_storage_failure_leaves_snapshot_behind(monkeypatch):
+    # Gate-baseline invariant in process_year's partial publish: if the
+    # storage publish throws mid-cycle, the snapshot must NOT have advanced.
+    # Snapshot behind -> the next cycle re-diffs and over-renders (safe);
+    # snapshot ahead would mask the unpublished changes as "unchanged".
+    import pytest
+
+    from src.data.utils import create_objs
+
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    snap = (create_objs(YEAR), deepcopy(h.start_teams))
+    monkeypatch.setattr(data_main, "read_snapshot", lambda year: deepcopy(snap))
+    monkeypatch.setattr(data_main, "write_objs_storage", _raise)
+    with pytest.raises(RuntimeError):
+        h.run_partial_cycle()
+    assert h.snapshot_calls == []
+
+
+def test_partial_cycle_db_mode_snapshot_miss_still_falls_back_to_db(monkeypatch):
+    # DB mode keeps its snapshot fallback: teams + objs reload from the DB and
+    # the cycle runs to completion (publish + DB write).
+    from src.data.utils import create_objs
+
+    h = PipelineHarness(monkeypatch, disable_db=False)
+    monkeypatch.setattr(data_main, "read_objs_db", lambda year: create_objs(YEAR))
+    h.run_partial_cycle()
+
+    assert "tba" in h.events
+    assert len(h.storage_calls) == 1
+    assert "write_objs_db" in h.events
+
+
 # ------------------------- refresh_teams (both modes) -------------------------
 
 
@@ -409,6 +500,7 @@ class RefreshHarness:
         self.publish_calls: List[Any] = []
         self.snapshot_writes: List[Any] = []
         self.db_calls: List[str] = []
+        self.events: List[str] = []
 
         mp = monkeypatch
         mp.setattr(data_main, "DISABLE_DB", disable_db)
@@ -472,20 +564,19 @@ class RefreshHarness:
                 else None
             ),
         )
-        mp.setattr(
-            data_main,
-            "write_snapshot",
-            lambda year, objs, teams: self.snapshot_writes.append(
-                (year, deepcopy(teams))
-            ),
-        )
-        mp.setattr(
-            data_main,
-            "publish_team_artifacts",
-            lambda teams, changed, all_ty: self.publish_calls.append(
+
+        def fake_write_snapshot(year, objs, teams):
+            self.events.append("snapshot")
+            self.snapshot_writes.append((year, deepcopy(teams)))
+
+        def fake_publish_team_artifacts(teams, changed, all_ty):
+            self.events.append("publish")
+            self.publish_calls.append(
                 {"teams": deepcopy(teams), "changed": set(changed)}
-            ),
-        )
+            )
+
+        mp.setattr(data_main, "write_snapshot", fake_write_snapshot)
+        mp.setattr(data_main, "publish_team_artifacts", fake_publish_team_artifacts)
 
         mp.setattr(
             data_main,
@@ -544,6 +635,30 @@ def test_refresh_teams_dbless_quiet_publishes_nothing(monkeypatch):
     result = data_main.refresh_teams()
     assert result["teams_updated"] == 0
     assert h.publish_calls == []
+    assert h.snapshot_writes == []
+
+
+def test_refresh_teams_dbless_publishes_blobs_before_snapshot(monkeypatch):
+    # Invariant: blobs first, snapshot last. The snapshot is the change-gate
+    # baseline later cycles diff against, so it may only record state whose
+    # blobs are already published.
+    h = RefreshHarness(monkeypatch, disable_db=True)
+    data_main.refresh_teams()
+    assert h.events == ["publish", "snapshot"]
+
+
+def test_refresh_teams_dbless_publish_failure_leaves_snapshot_behind(monkeypatch):
+    # If publish_team_artifacts throws, the snapshot must NOT have been
+    # written: a snapshot ahead of the published blobs makes the change gate
+    # report "unchanged" forever (stale team blobs until a manual full cycle).
+    # Snapshot behind is recoverable — the next refresh_teams re-detects the
+    # diff against the old snapshot and republishes.
+    import pytest
+
+    h = RefreshHarness(monkeypatch, disable_db=True)
+    monkeypatch.setattr(data_main, "publish_team_artifacts", _raise)
+    with pytest.raises(RuntimeError):
+        data_main.refresh_teams()
     assert h.snapshot_writes == []
 
 

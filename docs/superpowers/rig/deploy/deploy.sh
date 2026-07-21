@@ -189,13 +189,15 @@ EOF
   rm -f "$cfg"
 }
 
-# Full-stack mode: serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb). The DB
-# stays connected (no DISABLE_DB) — it is still written each cycle and is the
-# fallback. DISABLE_DB=True is a demonstrated db-less toggle, NOT the deployed
-# default: setting it makes the pipeline skip DB writes and forces DuckDB serving
-# from Parquet + the state snapshot (requires a full historical Parquet backfill
-# first, or EPA seeds regress to the rookie mean). To flip staging to a db-less
-# demo, redeploy with `--update-env-vars=DISABLE_DB=True`; revert by removing it.
+# Full-stack mode: serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb).
+# DISABLE_DB=True IS the deployed configuration (DB retirement Phase 2 flip,
+# 2026-07-21T16:07Z, via `make flip-dbless`): the pipeline skips all DB writes
+# and serves from Parquet + the state snapshot. Cloud SQL stays bound only as
+# the rollback path during the 48 h soak (`make flip-db`, then
+# `make reprocess-curr-year` to rehydrate the staled DB); Phase 4 deletes it.
+# NOTE: step_backend's --set-env-vars does NOT include DISABLE_DB, so a
+# from-scratch stand-up (or `deploy.sh backend`) lands in DB mode — re-apply
+# with `make flip-dbless`. `make ship` rolls the image only and preserves env.
 API_BACKEND="${API_BACKEND:-duckdb}"
 
 step_backend() {
@@ -209,6 +211,17 @@ step_backend() {
 }
 
 step_seed() {
+  # DEPRECATED (DB retirement Phase 2, 2026-07-21): this is a DB-MODE seed —
+  # it creates the SQL schema and runs the pipeline without DISABLE_DB, so it
+  # would compute from (and publish over GCS from) the STALING Cloud SQL data.
+  # Production is db-less; a db-less stand-up replacement lands with Phase 4.
+  # Guarded until then.
+  if [[ "${FORCE_DB_SEED:-}" != "1" ]]; then
+    echo "REFUSING step_seed: DB-mode seed on a db-less deployment would publish" >&2
+    echo "from the staling Cloud SQL DB over good GCS artifacts. If you really" >&2
+    echo "mean it (e.g. after 'make flip-db' + reprocess), rerun with FORCE_DB_SEED=1." >&2
+    exit 1
+  fi
   # create_all needs the model classes imported first (import src.db.models);
   # update_curr_year(partial=False) writes GCS blobs BEFORE post_process inserts
   # Team rows, so a trailing partial cycle re-renders teams/all with teams present.
