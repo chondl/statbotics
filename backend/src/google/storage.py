@@ -2,12 +2,12 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
-import json
 import os
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, TypeVar
 import zlib
 
 from google.cloud import storage
+import orjson
 
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
 from src.data.backend import (
@@ -46,13 +46,14 @@ GC_BATCH_SIZE = 100
 
 
 def compress(data: Any) -> bytes:
-    # start = datetime.now()
-    json_bytes = json.dumps(data).encode("utf-8")
-    compressed = zlib.compress(json_bytes)
-    # print(
-    #     f"Compressed data from {len(json_bytes)} to {len(compressed)} bytes in {datetime.now() - start}"
-    # )
-    return compressed
+    # orjson for speed; OPT_NON_STR_KEYS coerces int dict keys (e.g. the
+    # team_to_events blob) to strings exactly as stdlib json does. Wire format
+    # is unchanged: zlib-compressed JSON with no Content-Encoding, decoded by
+    # pako.inflate + JSON.parse on the frontend. Note orjson serializes NaN as
+    # null (stdlib's NaN literal would break JSON.parse anyway), so site-blob
+    # data must never contain NaN.
+    json_bytes = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
+    return zlib.compress(json_bytes)
 
 
 def _bucket() -> Any:
@@ -121,11 +122,57 @@ def _publish(plan: UploadPlan) -> None:
     write_manifest(plan.manifest, bucket)
 
 
+def _team_render_set(
+    curr_ty: Dict[int, Any],
+    orig_ty: Optional[Dict[int, Any]],
+    teams_by_num: Dict[int, Team],
+    orig_teams_by_num: Optional[Dict[int, Team]],
+    prev_blobs: Dict[str, str],
+) -> Set[int]:
+    """Team numbers whose team/{num} blob must be (re)rendered this cycle.
+
+    A team blob is a pure function of (team row, that team's team_years).
+    Historical team_years never change on partial cycles — reprocess-year
+    chains a full current-year re-render in code (see
+    docs/superpowers/rig/deploy/Makefile, REPROCESS_DRIVER) — so a blob can
+    only change when the team's current-year TeamYear or its team row changed
+    since cycle start, or when it was never published. Correctness rule: a
+    blob must NEVER be stale — when a baseline is missing, render.
+    """
+    if orig_ty is None:
+        # Full rebuild: no baseline, render every current-year team.
+        return set(curr_ty)
+
+    # Candidates span orig teams too: a team whose current-year TeamYear was
+    # removed (e.g. TBA registration removal) must re-render to drop the year
+    # row.
+    candidates = set(curr_ty) | set(orig_ty)
+
+    if orig_teams_by_num is None:
+        # No team-row baseline (e.g. a partial cycle whose snapshot read
+        # failed and fell back to DB team rows): cannot prove any team row
+        # unchanged, so render every candidate.
+        return candidates
+
+    render: Set[int] = set()
+    for num in candidates:
+        if (
+            f"team/{num}" not in prev_blobs  # never published
+            or not nan_safe_eq(curr_ty.get(num), orig_ty.get(num))  # TY changed
+            or not nan_safe_eq(
+                teams_by_num.get(num), orig_teams_by_num.get(num)
+            )  # team row changed
+        ):
+            render.add(num)
+    return render
+
+
 def write_objs(
     objs: objs_type,
     orig_objs: Optional[objs_type] = None,
     teams: Optional[List[Team]] = None,
     parquet: Optional[Dict[str, bytes]] = None,
+    orig_teams: Optional[List[Team]] = None,
 ) -> None:
     year = CURR_YEAR
     year_obj = objs[0]
@@ -205,21 +252,36 @@ def write_objs(
         team_to_events[team_event.team].append(team_event.event)
     add("team_to_events", team_to_events)
 
-    # team/{team.team}
-    all_team_years = _best_effort("team pages", get_team_years_db, None)
-    if all_team_years is not None:
-        team_years_by_team: Dict[int, List[Any]] = defaultdict(list)
-        for ty in all_team_years:
-            if ty.year != year:
+    # team/{team.team} — gated: on partial cycles only render teams whose blob
+    # could have changed (current-year TeamYear or team row vs cycle start, or
+    # never published). Full cycles (orig_objs None) render everything.
+    curr_ty = {ty.team: ty for ty in team_years}
+    orig_ty = (
+        None if orig_objs is None else {ty.team: ty for ty in orig_objs[1].values()}
+    )
+    teams_by_num = {t.team: t for t in teams}
+    orig_teams_by_num = None if orig_teams is None else {t.team: t for t in orig_teams}
+    render_nums = _team_render_set(
+        curr_ty, orig_ty, teams_by_num, orig_teams_by_num, prev_blobs
+    )
+    if render_nums:
+        # The all-years fetch exists only to feed team blobs; skip it entirely
+        # on quiet cycles where the gate renders none.
+        all_team_years = _best_effort("team pages", get_team_years_db, None)
+        if all_team_years is not None:
+            team_years_by_team: Dict[int, List[Any]] = defaultdict(list)
+            for ty in all_team_years:
+                if ty.year != year:
+                    team_years_by_team[ty.team].append(ty)
+            for ty in team_years:
                 team_years_by_team[ty.team].append(ty)
-        for ty in team_years:
-            team_years_by_team[ty.team].append(ty)
-        teams_by_num = {t.team: t for t in teams}
-        for num in {ty.team for ty in team_years}:
-            team_obj = teams_by_num.get(num)
-            if team_obj is None:
-                continue
-            add(f"team/{num}", _read_team(team_obj, team_years_by_team.get(num, [])))
+            for num in render_nums:
+                team_obj = teams_by_num.get(num)
+                if team_obj is None:
+                    continue
+                add(
+                    f"team/{num}", _read_team(team_obj, team_years_by_team.get(num, []))
+                )
 
     # noteworthy_matches/{year}
     noteworthy_matches = _best_effort(

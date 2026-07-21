@@ -198,32 +198,32 @@ class EPA(Model):
         result: Dict[str, Any] = {"epa": float(rounded_mean[0])}
 
         if te is not None:
-            te.epa = rounded_mean[0]
+            te.epa = float(rounded_mean[0])
 
             if self.year_num >= 2016:
-                te.auto_epa = rounded_mean[1]
-                te.teleop_epa = rounded_mean[2]
-                te.endgame_epa = rounded_mean[3]
-                te.rp_1_epa = round(self.epas[team].mean[4], 4)
-                te.rp_2_epa = round(self.epas[team].mean[5], 4)
-                te.rp_3_epa = round(self.epas[team].mean[6], 4)
-                te.tiebreaker_epa = rounded_mean[7]
+                te.auto_epa = float(rounded_mean[1])
+                te.teleop_epa = float(rounded_mean[2])
+                te.endgame_epa = float(rounded_mean[3])
+                te.rp_1_epa = round(float(self.epas[team].mean[4]), 4)
+                te.rp_2_epa = round(float(self.epas[team].mean[5]), 4)
+                te.rp_3_epa = round(float(self.epas[team].mean[6]), 4)
+                te.tiebreaker_epa = float(rounded_mean[7])
                 for i in range(0, 10):
-                    setattr(te, f"comp_{i}_epa", rounded_mean[i + 8])
+                    setattr(te, f"comp_{i}_epa", float(rounded_mean[i + 8]))
 
         if ty is not None:
-            ty.epa = rounded_mean[0]
+            ty.epa = float(rounded_mean[0])
 
             if self.year_num >= 2016:
-                ty.auto_epa = rounded_mean[1]
-                ty.teleop_epa = rounded_mean[2]
-                ty.endgame_epa = rounded_mean[3]
-                ty.rp_1_epa = round(self.epas[team].mean[4], 4)
-                ty.rp_2_epa = round(self.epas[team].mean[5], 4)
-                ty.rp_3_epa = round(self.epas[team].mean[6], 5)
-                ty.tiebreaker_epa = rounded_mean[7]
+                ty.auto_epa = float(rounded_mean[1])
+                ty.teleop_epa = float(rounded_mean[2])
+                ty.endgame_epa = float(rounded_mean[3])
+                ty.rp_1_epa = round(float(self.epas[team].mean[4]), 4)
+                ty.rp_2_epa = round(float(self.epas[team].mean[5]), 4)
+                ty.rp_3_epa = round(float(self.epas[team].mean[6]), 5)
+                ty.tiebreaker_epa = float(rounded_mean[7])
                 for i in range(0, 10):
-                    setattr(ty, f"comp_{i}_epa", rounded_mean[i + 8])
+                    setattr(ty, f"comp_{i}_epa", float(rounded_mean[i + 8]))
 
         if self.year_num >= 2016:
             result["auto_epa"] = float(rounded_mean[1])

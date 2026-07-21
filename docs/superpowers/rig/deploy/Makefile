@@ -124,11 +124,22 @@ update-curr-year: ## Cheap incremental current-year update (etag pre-check, same
 # re-ingests that year fresh (new offseason events) and regenerates its Parquet;
 # backfill_blobs republishes its hist/ site blobs for the frontend. Prefer this
 # over a full `reset_all_years` when only one year changed.
+#
+# The driver ends by running reset_curr_year's body (update_curr_year(partial=
+# False) + refresh_teams) IN the job: team/{num} site blobs embed each team's
+# full-history team_years, and the team-blob change gate (storage.py
+# _team_render_set) skips them on partial cycles on the assumption that
+# historical years only change here — so a historical reprocess MUST chain a
+# full current-year re-render or team blobs go stale. Chaining inside the
+# driver (not a curl in the recipe) means it runs even if the job is executed
+# by hand and cannot be forgotten. Unlike `make reprocess-curr-year` there is
+# no HTTP edge here, so the "524 at the edge is fine" caveat does not apply —
+# `jobs execute --wait` returns only when everything (chain included) finished.
 JOB_NAME ?= statbotics-reprocess-$(YEAR)
-REPROCESS_DRIVER = import src.db.models, src.data.main as dm, backfill_blobs; from src.data.utils import create_objs; from src.data.tba import load_teams; from src.db.functions.clear_year import clear_year; t=load_teams(cache=True); clear_year($(YEAR)); dm.process_year($(YEAR), False, False, True, t, create_objs($(YEAR)), None); backfill_blobs.main(['$(YEAR)','--force']); print('REPROCESS_$(YEAR)_COMPLETE')
+REPROCESS_DRIVER = import src.db.models, src.data.main as dm, backfill_blobs; from src.data.utils import create_objs; from src.data.tba import load_teams; from src.db.functions.clear_year import clear_year; t=load_teams(cache=True); clear_year($(YEAR)); dm.process_year($(YEAR), False, False, True, t, create_objs($(YEAR)), None); backfill_blobs.main(['$(YEAR)','--force']); print('REPROCESS_$(YEAR)_COMPLETE'); print('Chaining full current-year re-render (team blobs embed full history)...'); dm.update_curr_year(partial=False, tba_partial=False); dm.refresh_teams(); print('RESET_CURR_YEAR_CHAIN_COMPLETE')
 
 .PHONY: reprocess-year
-reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end. Usage: make reprocess-year YEAR=2025
+reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end, then chain a full current-year re-render. Usage: make reprocess-year YEAR=2025
 	@set -e; \
 	echo "Reprocessing $(YEAR) (clear + process + parquet + hist blobs) as a Cloud Run job..."; \
 	$(GC) run jobs delete $(JOB_NAME) --region $(REGION) --quiet 2>/dev/null || true; \
@@ -138,7 +149,7 @@ reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-
 	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)|DATABASE_URL=$(DATABASE_URL)" \
 	  --set-secrets "TBA_AUTH_KEY=tba-auth-key:latest,PGPASSWORD=db-password:latest" \
 	  --command python --args "^@@@^-c@@@$(REPROCESS_DRIVER)" \
-	  --cpu 2 --memory $(API_MEMORY) --task-timeout 3000 --max-retries 0; \
+	  --cpu 2 --memory $(API_MEMORY) --task-timeout 3600 --max-retries 0; \
 	$(GC) run jobs execute $(JOB_NAME) --region $(REGION) --wait; \
 	$(MAKE) resume-cron
 
