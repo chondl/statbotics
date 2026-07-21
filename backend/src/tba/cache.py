@@ -145,25 +145,29 @@ def pack_archive(name: str, root: str) -> bytes:
 
 def extract_archive(raw: bytes, dest: str) -> Dict[str, Dict[str, str]]:
     """Extract an archive's pickles into dest; return its manifest dict.
-    Member paths are validated (regular files, no absolute/.. escapes)."""
+    Only regular-file members whose resolved path stays inside dest are
+    written — absolute-path and ``..``-escape members are skipped, and
+    non-file members (symlinks, devices, dirs) are never created."""
     manifest: Dict[str, Dict[str, str]] = {}
+    root = os.path.normpath(dest)
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
         for member in tar.getmembers():
             if not member.isfile():
                 continue
-            name = member.name.lstrip("./")
-            if name.startswith("/") or ".." in name.split("/"):
+            # os.path.join discards root for absolute member names, so the
+            # containment check below rejects those too.
+            target = os.path.normpath(os.path.join(root, member.name))
+            if not target.startswith(root + os.sep):
                 continue
             handle = tar.extractfile(member)
             if handle is None:
                 continue
             payload = handle.read()
-            if name == MANIFEST_NAME:
+            if target == os.path.join(root, MANIFEST_NAME):
                 manifest = json.loads(payload)
                 continue
-            path = os.path.join(dest, name)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "wb") as out:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as out:
                 out.write(payload)
     return manifest
 

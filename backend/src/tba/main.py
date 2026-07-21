@@ -66,7 +66,11 @@ def get_tba(
                 return load_cache(cache_path), new_etag
         return data, new_etag
 
-    # Cache Miss: rewrite pickle + manifest etag state
-    dump_cache(cache_path, data)
-    tba_cache.record_success(url, new_etag)
+    # Cache Miss: rewrite pickle + manifest etag state. If the pickle write
+    # failed, the manifest must not claim the new etag for the old pickle —
+    # a later manifest-backed 304 would then serve stale data. The returned
+    # (data, new_etag) for the DB/objs[5] flow is unaffected: its etag
+    # describes the response body the caller already holds.
+    if dump_cache(cache_path, data):
+        tba_cache.record_success(url, new_etag)
     return data, new_etag

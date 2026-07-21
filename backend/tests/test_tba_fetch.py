@@ -162,7 +162,7 @@ def test_dump_cache_logs_oserror(tmp_path, capsys):
     blocker.write_text("not a directory")
     bad_path = str(blocker / "sub")
 
-    dump_cache(bad_path, {"x": 1})  # must not raise
+    assert dump_cache(bad_path, {"x": 1}) is False  # must not raise
 
     out = capsys.readouterr().out
     assert bad_path in out

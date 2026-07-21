@@ -6,8 +6,10 @@ guard, dirty-only persist, and GCS-failure honesty (the pipeline must be
 indifferent to cache subsystem failure). No real GCS or TBA access.
 """
 
+import io
 import os
 import pickle
+import tarfile
 
 import pytest
 
@@ -89,6 +91,64 @@ def test_archive_pack_extract_round_trip(tmp_path):
     }
 
 
+def _tar_with(extra_members):
+    """A tar.gz holding one benign pickle plus the given hostile TarInfo
+    members (crafted in-test; tarfile.add would refuse to create them)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        payload = pickle.dumps(["ok"])
+        info = tarfile.TarInfo("events/2025/data.p")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+        for info, payload in extra_members:
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload) if payload else None)
+    return buf.getvalue()
+
+
+def test_extract_skips_parent_traversal_members(tmp_path):
+    raw = _tar_with(
+        [
+            (tarfile.TarInfo("../escape"), b"evil"),
+            (tarfile.TarInfo("events/../../escape2"), b"evil"),
+        ]
+    )
+    dest = tmp_path / "dest"
+
+    tba_cache.extract_archive(raw, str(dest))
+
+    assert _read_pickle(str(dest), "events/2025") == ["ok"]  # benign sibling
+    assert not (tmp_path / "escape").exists()
+    assert not (tmp_path / "escape2").exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["dest"]
+
+
+def test_extract_skips_absolute_path_member(tmp_path):
+    outside = tmp_path / "outside" / "evil"
+    raw = _tar_with([(tarfile.TarInfo(str(outside)), b"evil")])
+    dest = tmp_path / "dest"
+
+    tba_cache.extract_archive(raw, str(dest))
+
+    assert _read_pickle(str(dest), "events/2025") == ["ok"]  # benign sibling
+    assert not outside.exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["dest"]
+
+
+def test_extract_skips_symlink_member(tmp_path):
+    link = tarfile.TarInfo("events/2025/link")
+    link.type = tarfile.SYMTYPE
+    link.linkname = str(tmp_path / "target")
+    raw = _tar_with([(link, b"")])
+    dest = tmp_path / "dest"
+
+    tba_cache.extract_archive(raw, str(dest))
+
+    assert _read_pickle(str(dest), "events/2025") == ["ok"]  # benign sibling
+    # No symlink (or anything else) at the member's path.
+    assert not os.path.lexists(os.path.join(str(dest), "events/2025/link"))
+
+
 """
 3. get_tba manifest integration (design §2.2, §3.3)
 """
@@ -110,6 +170,63 @@ def test_get_tba_records_manifest_on_200(cache_dir, monkeypatch):
     assert tba_cache.stored_etag(url) == 'W/"a"'
     assert tba_cache._manifest[url]["last_validated"].endswith("Z")
     assert "2026" in tba_cache._dirty
+
+
+def test_get_tba_dump_failure_leaves_manifest_unchanged(cache_dir, monkeypatch, capsys):
+    """Failed pickle write must not record the new etag: the pickle still
+    holds the OLD data, and a manifest claiming the new etag for it would
+    make later manifest-backed 304s serve stale data."""
+    url = "event/2026iri/matches"
+    _write_pickle(cache_dir, url, ["old"])
+    tba_cache._manifest[url] = {
+        "etag": 'W/"old"',
+        "last_validated": "2020-01-01T00:00:00Z",
+    }
+    pickle_path = os.path.join(cache_dir, url, "data.p")
+    os.chmod(pickle_path, 0o444)  # the pickle rewrite will fail
+    monkeypatch.setattr(tba_main, "_get_tba", lambda u, etag=None: (["new"], 'W/"new"'))
+
+    try:
+        data, etag = tba_main.get_tba(url, etag=None, cache=False)
+    finally:
+        os.chmod(pickle_path, 0o644)
+
+    assert data == ["new"] and etag == 'W/"new"'  # DB/objs[5] flow untouched
+    assert tba_cache._manifest[url] == {
+        "etag": 'W/"old"',
+        "last_validated": "2020-01-01T00:00:00Z",
+    }
+    assert not tba_cache._dirty
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_get_tba_no_pickle_no_etag_is_unconditional(cache_dir, monkeypatch):
+    """etag=None and no cached pickle: nothing could satisfy a 304, so the
+    request must carry no If-None-Match header at all."""
+    url = "event/2026iri/matches"
+
+    class FakeSession:
+        calls = []
+        headers = {}
+
+        def get(self, u, headers=None, **kwargs):
+            self.calls.append(dict(headers or {}))
+
+            class Resp:
+                status_code = 200
+                headers = {"ETag": 'W/"a"'}
+
+                def json(self):
+                    return [1]
+
+            return Resp()
+
+    monkeypatch.setattr(tba_main, "session", FakeSession())
+
+    data, etag = tba_main.get_tba(url, etag=None, cache=False)
+
+    assert data == [1] and etag == 'W/"a"'
+    assert FakeSession.calls == [{}]  # no If-None-Match sent
 
 
 def test_get_tba_manifest_etag_304_serves_pickle_and_refreshes(cache_dir, monkeypatch):
