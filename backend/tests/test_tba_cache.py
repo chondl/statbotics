@@ -251,7 +251,9 @@ def test_get_tba_manifest_etag_304_serves_pickle_and_refreshes(cache_dir, monkey
     assert data == [42]  # the validated pickle, not a bare True
     assert etag == 'W/"a"'
     assert tba_cache._manifest[url]["last_validated"] != "2020-01-01T00:00:00Z"
-    assert "2026" in tba_cache._dirty
+    # A 304 changes only last_validated: metadata-dirty, not content-dirty.
+    assert "2026" in tba_cache._meta_dirty
+    assert "2026" not in tba_cache._dirty
 
 
 def test_get_tba_cache_hit_touches_nothing(cache_dir, monkeypatch):
@@ -272,6 +274,7 @@ def test_get_tba_cache_hit_touches_nothing(cache_dir, monkeypatch):
     assert data == [7] and etag is None
     assert tba_cache._manifest[url]["last_validated"] == "2020-01-01T00:00:00Z"
     assert not tba_cache._dirty
+    assert not tba_cache._meta_dirty
 
 
 def test_get_tba_explicit_etag_flow_unchanged(cache_dir, monkeypatch):
@@ -434,7 +437,133 @@ def test_persist_upload_failure_never_raises(tmp_path, monkeypatch, capsys):
 
 
 """
-7. Pipeline wiring: load_teams hydrates the global archive
+7. Metadata-only dirty debounce (design §2.2 refinement): last_validated-only
+   changes re-upload an archive at most once per 6h; content changes always
+   upload. last_validated is an optimization hint, so deferring it only costs
+   extra 304s, never correctness.
+"""
+
+
+def _hours_ago(hours):
+    from datetime import datetime, timedelta, timezone
+
+    ts = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _persist_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(tba_main, "TBA_CACHE_DIR", str(tmp_path))
+    _write_pickle(str(tmp_path), "events/2025", [1])
+    tba_cache._manifest["events/2025"] = {
+        "etag": "E1",
+        "last_validated": _hours_ago(0),
+    }
+    uploads = {}
+    monkeypatch.setattr(
+        tba_cache,
+        "_upload_archive",
+        lambda name, data: uploads.__setitem__(name, data),
+    )
+    return uploads
+
+
+def test_meta_only_persist_debounced_within_interval(tmp_path, monkeypatch):
+    uploads = _persist_setup(tmp_path, monkeypatch)
+    tba_cache._meta_dirty.add("2025")
+    stamp = _hours_ago(1)
+    tba_cache._meta_persisted["2025"] = stamp
+
+    tba_cache.persist()
+
+    assert not uploads  # debounced
+    assert "2025" in tba_cache._meta_dirty  # retained for a later cycle
+    assert tba_cache._meta_persisted["2025"] == stamp
+
+
+def test_meta_only_persist_uploads_after_interval(tmp_path, monkeypatch):
+    uploads = _persist_setup(tmp_path, monkeypatch)
+    tba_cache._meta_dirty.add("2025")
+    old_stamp = _hours_ago(7)
+    tba_cache._meta_persisted["2025"] = old_stamp
+
+    tba_cache.persist()
+
+    assert set(uploads) == {"2025"}
+    assert not tba_cache._meta_dirty
+    # The stamp refreshed and travels inside the archive's manifest.
+    manifest = tba_cache.extract_archive(uploads["2025"], str(tmp_path / "out"))
+    assert manifest["__archive__"]["meta_persisted"] > old_stamp
+    assert "events/2025" in manifest
+
+
+def test_meta_only_persist_uploads_when_never_persisted(tmp_path, monkeypatch):
+    uploads = _persist_setup(tmp_path, monkeypatch)
+    tba_cache._meta_dirty.add("2025")
+
+    tba_cache.persist()
+
+    assert set(uploads) == {"2025"}
+    assert "2025" in tba_cache._meta_persisted
+
+
+def test_content_dirty_persist_ignores_debounce(tmp_path, monkeypatch):
+    uploads = _persist_setup(tmp_path, monkeypatch)
+    tba_cache._dirty.add("2025")
+    tba_cache._meta_persisted["2025"] = _hours_ago(0)  # just persisted
+
+    tba_cache.persist()
+
+    assert set(uploads) == {"2025"}
+    assert not tba_cache._dirty
+
+
+def test_persist_failure_restores_meta_stamp(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tba_main, "TBA_CACHE_DIR", str(tmp_path))
+    _write_pickle(str(tmp_path), "events/2025", [1])
+    tba_cache._meta_dirty.add("2025")
+    old_stamp = _hours_ago(7)
+    tba_cache._meta_persisted["2025"] = old_stamp
+
+    def boom(name, data):
+        raise RuntimeError("gcs down")
+
+    monkeypatch.setattr(tba_cache, "_upload_archive", boom)
+    tba_cache.persist()  # must not raise
+
+    # The stamp rolls back so the retry is not debounced for 6h.
+    assert tba_cache._meta_persisted["2025"] == old_stamp
+    assert "2025" in tba_cache._meta_dirty
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_hydrate_restores_meta_stamp_and_keeps_it_out_of_manifest(
+    tmp_path, monkeypatch
+):
+    packed_root = str(tmp_path / "packed")
+    _write_pickle(packed_root, "events/2025", ["ev"])
+    tba_cache._manifest["events/2025"] = {
+        "etag": "E1",
+        "last_validated": _hours_ago(0),
+    }
+    stamp = _hours_ago(2)
+    tba_cache._meta_persisted["2025"] = stamp
+    raw = tba_cache.pack_archive("2025", packed_root)
+    tba_cache.reset_state()
+
+    monkeypatch.setattr(tba_main, "TBA_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        tba_cache,
+        "_download_archive",
+        lambda name: raw if name == "2025" else None,
+    )
+    tba_cache.hydrate(2025)
+
+    assert tba_cache._meta_persisted["2025"] == stamp
+    assert "__archive__" not in tba_cache._manifest  # reserved key stripped
+
+
+"""
+8. Pipeline wiring: load_teams hydrates the global archive
 """
 
 

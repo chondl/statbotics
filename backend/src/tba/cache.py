@@ -28,10 +28,22 @@ ARCHIVE_PREFIX = "tba-cache"
 GLOBAL_ARCHIVE = "global"
 MANIFEST_NAME = "manifest.json"
 
+# Reserved manifest key carrying per-archive metadata (not a cache-key URL):
+# {"meta_persisted": <iso>} — when this archive was last uploaded for a
+# metadata-only change. Stripped from the url manifest on hydrate.
+ARCHIVE_META_KEY = "__archive__"
+
+# Metadata-only dirtiness (a 304 refreshing last_validated) re-uploads an
+# archive at most this often. last_validated is an optimization hint: losing
+# a few hours of it costs extra 304s, never correctness.
+META_PERSIST_INTERVAL_HOURS = 6
+
 # Process-local state. url -> {"etag": ..., "last_validated": ...}
 _manifest: Dict[str, Dict[str, str]] = {}
 _hydrated: Set[str] = set()  # archive names already hydrated this process
-_dirty: Set[str] = set()  # archive names needing persist
+_dirty: Set[str] = set()  # content-dirty: pickle written / etag changed
+_meta_dirty: Set[str] = set()  # only last_validated changed (debounced)
+_meta_persisted: Dict[str, str] = {}  # archive -> last metadata upload (iso)
 _blocked: Set[str] = set()  # hydrate errored (not just missing): never persist
 
 # REFRESH_TBA force flag (design §2.3 "manual force"): set per-run by the
@@ -47,6 +59,8 @@ def reset_state() -> None:
     _manifest.clear()
     _hydrated.clear()
     _dirty.clear()
+    _meta_dirty.clear()
+    _meta_persisted.clear()
     _blocked.clear()
     set_force_refresh(False)
 
@@ -101,9 +115,7 @@ def _now_iso() -> str:
 
 def _parse_iso(ts: str) -> Optional[datetime]:
     try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
 
@@ -162,7 +174,7 @@ def record_not_modified(url: str, etag: Optional[str]) -> None:
     if etag is None or entry is None or entry.get("etag") != etag:
         return
     entry["last_validated"] = _now_iso()
-    _dirty.add(archive_for(url))
+    _meta_dirty.add(archive_for(url))
 
 
 """
@@ -177,6 +189,8 @@ def pack_archive(name: str, root: str) -> bytes:
     manifest = {
         url: dict(entry) for url, entry in _manifest.items() if archive_for(url) == name
     }
+    if name in _meta_persisted:
+        manifest[ARCHIVE_META_KEY] = {"meta_persisted": _meta_persisted[name]}
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for dirpath, _dirs, files in os.walk(root):
             if "data.p" not in files:
@@ -276,6 +290,9 @@ def hydrate(year: Optional[int] = None) -> None:
                 print(f"TBA cache: no archive for {name} yet (cold start)")
             else:
                 manifest = extract_archive(raw, _cache_dir())
+                meta = manifest.pop(ARCHIVE_META_KEY, None)
+                if meta is not None and "meta_persisted" in meta:
+                    _meta_persisted.setdefault(name, meta["meta_persisted"])
                 # Entries recorded this process are fresher than the archive.
                 for url, entry in manifest.items():
                     _manifest.setdefault(url, entry)
@@ -289,27 +306,50 @@ def hydrate(year: Optional[int] = None) -> None:
         _hydrated.add(name)
 
 
+def _meta_persist_due(name: str) -> bool:
+    stamp = _parse_iso(_meta_persisted.get(name, ""))
+    if stamp is None:
+        return True
+    return datetime.now(timezone.utc) - stamp >= timedelta(
+        hours=META_PERSIST_INTERVAL_HOURS
+    )
+
+
 def persist() -> None:
     """Upload every dirty archive (re-packed from the local cache dir).
     Dirty-only, atomic per archive, never raises; a failed upload stays
-    dirty for a later retry."""
+    dirty for a later retry. Content-dirty archives always upload;
+    metadata-only dirtiness (304s refreshing last_validated) uploads at most
+    once per META_PERSIST_INTERVAL_HOURS, tracked by a stamp stored in the
+    archive's own manifest so the debounce survives process restarts."""
     if _gcs_disabled():
         return
-    for name in sorted(_dirty):
+    for name in sorted(_dirty | _meta_dirty):
         if name in _blocked:
             print(
                 f"WARNING: not persisting TBA cache {name}: "
                 "its hydrate failed this process"
             )
             continue
+        if name not in _dirty and not _meta_persist_due(name):
+            continue  # debounced: stays meta-dirty for a later cycle
+        prev_stamp = _meta_persisted.get(name)
+        # Stamp before packing so the archive's manifest carries it.
+        _meta_persisted[name] = _now_iso()
         try:
             _upload_archive(name, pack_archive(name, _cache_dir()))
             print(f"TBA cache: persisted {name}")
         except Exception:
+            # Roll the stamp back so the retry is not debounced for hours.
+            if prev_stamp is None:
+                _meta_persisted.pop(name, None)
+            else:
+                _meta_persisted[name] = prev_stamp
             print(f"WARNING: failed to persist TBA cache archive {name}")
             traceback.print_exc()
             continue
         _dirty.discard(name)
+        _meta_dirty.discard(name)
 
 
 __all__: List[str] = [
