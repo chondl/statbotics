@@ -315,10 +315,12 @@ def test_full_cycle_db_mode_still_writes_db_and_publishes_last(monkeypatch):
     h.run_full_cycle()
 
     # DB writes are unchanged and the publish comes after every mutation.
+    # Within the publish: blobs/manifest first, snapshot last (gate-baseline
+    # invariant — the snapshot may only record already-published state).
     assert h.events.index("write_objs_db") < h.events.index("update_teams_db")
     assert h.events.index("update_teams_db") < h.events.index("post_process_tba")
-    assert h.events.index("post_process_tba") < h.events.index("snapshot")
-    assert h.events.index("snapshot") < h.events.index("storage")
+    assert h.events.index("post_process_tba") < h.events.index("storage")
+    assert h.events.index("storage") < h.events.index("snapshot")
 
     # update_teams_db received the post-processed rows.
     db_teams = {t.team: t for t in h.db_teams_written[0]}
@@ -360,6 +362,19 @@ def test_full_cycle_dbless_successful_publish_clears_skip_flag(monkeypatch):
     h.run_full_cycle()
     assert len(h.storage_calls) == 1
     assert data_main.db_less_publish_skipped is False
+
+
+def test_full_cycle_dbless_storage_failure_leaves_snapshot_behind(monkeypatch):
+    # Same gate-baseline invariant in publish_curr_year: the snapshot it
+    # writes is the baseline the NEXT partial cycle diffs against, so a
+    # storage failure must leave it un-advanced.
+    import pytest
+
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    monkeypatch.setattr(data_main, "write_objs_storage", _raise)
+    with pytest.raises(RuntimeError):
+        h.run_full_cycle()
+    assert h.snapshot_calls == []
 
 
 def test_full_cycle_db_mode_team_years_failure_still_publishes(monkeypatch):
@@ -435,6 +450,26 @@ def test_partial_cycle_dbless_snapshot_hit_runs_and_clears_flag(monkeypatch):
     assert len(h.snapshot_calls) == 1
     assert len(h.storage_calls) == 1
     assert data_main.db_less_partial_skipped is False
+    # Blobs/manifest first, snapshot last (gate-baseline invariant).
+    assert h.events.index("storage") < h.events.index("snapshot")
+
+
+def test_partial_cycle_dbless_storage_failure_leaves_snapshot_behind(monkeypatch):
+    # Gate-baseline invariant in process_year's partial publish: if the
+    # storage publish throws mid-cycle, the snapshot must NOT have advanced.
+    # Snapshot behind -> the next cycle re-diffs and over-renders (safe);
+    # snapshot ahead would mask the unpublished changes as "unchanged".
+    import pytest
+
+    from src.data.utils import create_objs
+
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    snap = (create_objs(YEAR), deepcopy(h.start_teams))
+    monkeypatch.setattr(data_main, "read_snapshot", lambda year: deepcopy(snap))
+    monkeypatch.setattr(data_main, "write_objs_storage", _raise)
+    with pytest.raises(RuntimeError):
+        h.run_partial_cycle()
+    assert h.snapshot_calls == []
 
 
 def test_partial_cycle_db_mode_snapshot_miss_still_falls_back_to_db(monkeypatch):

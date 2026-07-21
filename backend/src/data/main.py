@@ -141,12 +141,24 @@ def process_year(
         # its orig_teams baseline exists only on partial cycles (captured at
         # cycle start above); full cycles publish with orig=None → render-all.
         if partial:
-            write_snapshot(year_num, objs, teams)
-            timer.print(str(year_num) + " Write Snapshot")
-
+            # INVARIANT: blobs/manifest first, snapshot last (same
+            # gate-baseline rule as refresh_teams and publish_curr_year).
+            # The snapshot is the change-gate baseline the NEXT partial
+            # cycle diffs against, so it may only record state whose blobs
+            # are already published. A storage failure leaves the snapshot
+            # behind — the next cycle re-diffs against the old baseline and
+            # over-renders (safe). Snapshot-first would leave the baseline
+            # ahead of unpublished blobs on failure, and the gate would
+            # mask them as "unchanged" forever. write_snapshot is a pure
+            # serialize-and-upload of the in-memory objs/teams, and
+            # write_objs_storage mutates neither, so the swap has no data
+            # dependency in either direction.
             parquet_uploads = build_parquet_uploads(year_num, objs, teams)
             write_objs_storage(objs, orig_objs, teams, parquet_uploads, orig_teams)
             timer.print(str(year_num) + " Write Storage")
+
+            write_snapshot(year_num, objs, teams)
+            timer.print(str(year_num) + " Write Snapshot")
 
         if not DISABLE_DB:
             try:
@@ -249,12 +261,16 @@ def publish_curr_year(objs: objs_type, teams: List[Team]) -> List[Team]:
         teams = prune_teams(teams, event_teams)
         timer.print(str(CURR_YEAR) + " Prune Teams")
 
-    write_snapshot(CURR_YEAR, objs, teams)
-    timer.print(str(CURR_YEAR) + " Write Snapshot")
-
+    # INVARIANT: blobs/manifest first, snapshot last — the snapshot written
+    # here is the change-gate baseline the next partial cycle diffs against,
+    # so it may only record state whose blobs are already published (see the
+    # partial-cycle publish in process_year for the full reasoning).
     parquet_uploads = build_parquet_uploads(CURR_YEAR, objs, teams)
     write_objs_storage(objs, None, teams, parquet_uploads, None)
     timer.print(str(CURR_YEAR) + " Write Storage")
+
+    write_snapshot(CURR_YEAR, objs, teams)
+    timer.print(str(CURR_YEAR) + " Write Snapshot")
 
     return teams
 
