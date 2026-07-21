@@ -3,6 +3,7 @@ from typing import Any, Optional, Tuple, Union
 
 from requests import Session
 
+from src.tba import cache as tba_cache
 from src.tba.constants import AUTH_KEY
 from src.tba.utils import dump_cache, load_cache
 
@@ -38,16 +39,34 @@ def get_tba(
     url: str, etag: Optional[str] = None, cache: bool = True
 ) -> Tuple[Union[Any, bool], Optional[str]]:
     cache_path = os.path.join(TBA_CACHE_DIR, url)
-    if cache and os.path.exists(cache_path + "/data.p"):
-        # Cache Hit
+    has_pickle = os.path.exists(cache_path + "/data.p")
+    if cache and has_pickle:
+        # Cache Hit: no network, no manifest change
         return load_cache(cache_path), None
 
-    data, new_etag = _get_tba(url, etag)
+    # Manifest-backed conditional GET (design §2.2): when the caller passes
+    # no etag and the cached pickle exists to satisfy a 304, revalidate with
+    # the stored etag instead of refetching unconditionally. Explicit-etag
+    # callers (partial cycles) are untouched — dual-write with objs[5]/DB.
+    send_etag = etag
+    from_manifest = False
+    if etag is None and has_pickle:
+        send_etag = tba_cache.stored_etag(url)
+        from_manifest = send_etag is not None
 
-    # Either Etag or Invalid
+    data, new_etag = _get_tba(url, send_etag)
+
+    # Either Etag (304) or Invalid
     if type(data) is bool:
+        if data is True:
+            tba_cache.record_not_modified(url, new_etag)
+            if from_manifest:
+                # The caller sent no etag and expects data; serve the pickle
+                # the 304 just validated.
+                return load_cache(cache_path), new_etag
         return data, new_etag
 
-    # Cache Miss
+    # Cache Miss: rewrite pickle + manifest etag state
     dump_cache(cache_path, data)
+    tba_cache.record_success(url, new_etag)
     return data, new_etag
