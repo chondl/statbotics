@@ -53,7 +53,9 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
 - Snapshot + Parquet publishing are **on by default in the code** (no flag). Each
   cycle writes `state/snapshot.{year}` and folds current-year Parquet into the
   single manifest write.
-- `DISABLE_DB` — **demonstrated toggle, NOT the deployed default.** `DISABLE_DB=True`
+- `DISABLE_DB` — **the deployed production mode since 2026-07-21** (`make
+  flip-dbless`; rollback `make flip-db`; Cloud SQL retained during the 48 h
+  soak, deleted in Phase 4). `DISABLE_DB=True`
   makes the backend construct no engine/session, skip all DB writes, and serve
   `/v3`+`/v3/site` purely from Parquet + the snapshot. To flip staging to a db-less
   demo: `gcloud --project=statbotics-staging run services update statbotics-api

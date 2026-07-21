@@ -149,10 +149,10 @@ refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync; 
 
 # --------------------------- DATA: HISTORICAL YEAR ---------------------------
 # Targeted single-year reprocess as a Cloud Run JOB (jobs allow long timeouts;
-# the service HTTP path caps at 3600s). clear_year + process_year(partial=False)
-# re-ingests that year fresh (new offseason events) and regenerates its Parquet;
-# backfill_blobs republishes its hist/ site blobs for the frontend. Prefer this
-# over a full `reset_all_years` when only one year changed.
+# the service HTTP path caps at 3600s). process_year(partial=False) re-ingests
+# that year fresh (new offseason events), regenerates its Parquet, and emits its
+# hist/ site blobs from pipeline objects (db-less capable). Prefer this over a
+# full `reset_all_years` when only one year changed.
 #
 # The driver is src.data.main.reprocess_year — the SAME function the daily TBA
 # sweep runs — so job and sweep can never diverge. It re-ingests the year
