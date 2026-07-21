@@ -42,6 +42,7 @@ from src.db.write.main import (
 from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import write_objs as write_objs_storage
+from src.tba import cache as tba_cache
 
 # Set true when a db-less cross-season EPA seed found no prior-year data (a
 # partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
@@ -60,6 +61,9 @@ def process_year(
 ) -> List[Team]:
     timer = Timer()
     curr_year_gcs = year_num == CURR_YEAR and not DISABLE_GCS
+    # Warm the local TBA cache from GCS (year + global archives) before any
+    # fetch. Once per archive per process; never raises; zero TBA requests.
+    tba_cache.hydrate(year_num)
     orig_objs = deepcopy(objs)
     # Team-blob change-gate baseline: captured at cycle start, before anything
     # (process_year_tba today, or a future post-post_process teams publish)
@@ -137,6 +141,10 @@ def process_year(
         write_parquet(year_num, objs, teams)
         timer.print(str(year_num) + " Write Parquet")
 
+    # Re-pack + upload only dirty TBA cache archives now that the year's
+    # outputs (snapshot / storage / parquet) are written. Never raises.
+    tba_cache.persist()
+
     return teams
 
 
@@ -190,6 +198,10 @@ def reset_all_years():
         all_team_years[year_num] = {ty.team: ty for ty in objs[1].values()}
 
     post_process(teams, all_team_years)
+
+    # Catch-all for anything dirtied after the last per-year persist (e.g.
+    # the global teams archive written by load_teams on a cold start).
+    tba_cache.persist()
 
 
 def update_curr_year(partial: bool, tba_partial: bool):

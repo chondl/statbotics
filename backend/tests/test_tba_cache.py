@@ -11,6 +11,7 @@ import pickle
 
 import pytest
 
+import src.data.tba as data_tba
 import src.tba.cache as tba_cache
 import src.tba.main as tba_main
 
@@ -313,3 +314,17 @@ def test_persist_upload_failure_never_raises(tmp_path, monkeypatch, capsys):
 
     assert "2025" in tba_cache._dirty  # stays dirty for a later retry
     assert "WARNING" in capsys.readouterr().out
+
+
+"""
+7. Pipeline wiring: load_teams hydrates the global archive
+"""
+
+
+def test_load_teams_hydrates_global(monkeypatch):
+    called = []
+    monkeypatch.setattr(tba_cache, "hydrate", lambda year=None: called.append(year))
+    monkeypatch.setattr(data_tba, "get_teams_tba", lambda cache=True: [])
+
+    assert data_tba.load_teams() == []
+    assert called == [None]

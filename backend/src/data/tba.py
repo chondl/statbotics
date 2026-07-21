@@ -5,6 +5,7 @@ from src.constants import CURR_YEAR
 from src.data.utils import objs_type
 from src.db.functions import remove_teams_with_no_events, update_team_districts
 from src.db.models import ETag, Event, Team, TeamEvent, TeamYear, match_dict_to_objs
+from src.tba import cache as tba_cache
 from src.tba.constants import DISTRICT_MAPPING
 from src.tba.read_tba import (
     EventDict,
@@ -29,6 +30,8 @@ HELPER FUNCTIONS
 
 
 def load_teams(cache: bool = True) -> List[Team]:
+    # teams/{page} pickles + etags live in the global archive (design §2.1)
+    tba_cache.hydrate()
     teams = get_teams_tba(cache=cache)
     team_objs = [
         Team(
