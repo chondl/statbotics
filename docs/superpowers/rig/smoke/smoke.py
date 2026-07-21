@@ -41,6 +41,14 @@ import urllib.parse
 import urllib.request
 import zlib
 
+# Send a browser-like User-Agent on every request. Cloudflare (which fronts the
+# staging mirror) returns 403 to the default Python-urllib UA as suspected-bot
+# traffic, which otherwise fails every https check against the live mirror.
+_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) statbotics-smoke/1.0"
+_opener = urllib.request.build_opener()
+_opener.addheaders = [("User-Agent", _UA)]
+urllib.request.install_opener(_opener)
+
 TOL = 0.5  # EPA point tolerance for blob-vs-API equality
 
 _results = []
