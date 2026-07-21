@@ -1,7 +1,8 @@
 from collections import defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 import traceback
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from src.constants import CURR_YEAR, DISABLE_DB, DISABLE_GCS
 from src.data.avg import process_year as process_year_avg
@@ -42,10 +43,27 @@ from src.db.write.main import (
 from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import write_objs as write_objs_storage
+from src.tba import cache as tba_cache
 
 # Set true when a db-less cross-season EPA seed found no prior-year data (a
 # partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
 db_less_seed_incomplete = False
+
+
+@contextmanager
+def _tba_force_refresh(refresh_tba: bool) -> Iterator[None]:
+    """Scope the REFRESH_TBA force flag (TBA cache design §2.3) to one
+    pipeline run: when set, every get_tba call fetches unconditionally
+    (etag-less) and the archives are rebuilt from the responses. Always
+    cleared afterward so later runs in this process are not forced. The
+    REFRESH_TBA=1 env var is honored independently inside
+    tba_cache.force_refresh() (it covers job drivers calling process_year
+    directly)."""
+    tba_cache.set_force_refresh(refresh_tba)
+    try:
+        yield
+    finally:
+        tba_cache.set_force_refresh(False)
 
 
 def process_year(
@@ -60,6 +78,9 @@ def process_year(
 ) -> List[Team]:
     timer = Timer()
     curr_year_gcs = year_num == CURR_YEAR and not DISABLE_GCS
+    # Warm the local TBA cache from GCS (year + global archives) before any
+    # fetch. Once per archive per process; never raises; zero TBA requests.
+    tba_cache.hydrate(year_num)
     orig_objs = deepcopy(objs)
     # Team-blob change-gate baseline: captured at cycle start, before anything
     # (process_year_tba today, or a future post-post_process teams publish)
@@ -137,6 +158,10 @@ def process_year(
         write_parquet(year_num, objs, teams)
         timer.print(str(year_num) + " Write Parquet")
 
+    # Re-pack + upload only dirty TBA cache archives now that the year's
+    # outputs (snapshot / storage / parquet) are written. Never raises.
+    tba_cache.persist()
+
     return teams
 
 
@@ -165,7 +190,12 @@ def post_process(
         timer.print("Post TBA")
 
 
-def reset_all_years():
+def reset_all_years(refresh_tba: bool = False):
+    with _tba_force_refresh(refresh_tba):
+        _reset_all_years()
+
+
+def _reset_all_years():
     timer = Timer()
 
     start_year = 2002
@@ -191,8 +221,17 @@ def reset_all_years():
 
     post_process(teams, all_team_years)
 
+    # Catch-all for anything dirtied after the last per-year persist (e.g.
+    # the global teams archive written by load_teams on a cold start).
+    tba_cache.persist()
 
-def update_curr_year(partial: bool, tba_partial: bool):
+
+def update_curr_year(partial: bool, tba_partial: bool, refresh_tba: bool = False):
+    with _tba_force_refresh(refresh_tba):
+        _update_curr_year(partial, tba_partial)
+
+
+def _update_curr_year(partial: bool, tba_partial: bool):
     year = CURR_YEAR
     timer = Timer()
 
@@ -237,6 +276,41 @@ def update_curr_year(partial: bool, tba_partial: bool):
     if not partial:
         # triggers loading all team years
         post_process(teams, None)
+
+
+def reprocess_year(year_num: int) -> None:
+    """Full single-year historical reprocess for the daily TBA sweep
+    (design §2.3), mirroring the `reprocess-year` job driver in
+    docs/superpowers/rig/deploy/Makefile:
+
+    - process_year(partial=False, cache=True): re-ingests the year from the
+      freshly revalidated pickles (zero further TBA traffic for validated
+      paths), recomputes EPA with the prior-4-year team_years seeding read
+      inside process_year (all_team_years=None), rewrites the year's DB rows
+      (write_objs clean=True clears first) and republishes its Parquet.
+    - backfill_blobs: republishes the year's hist/ site blobs from the DB.
+    - Chained full current-year re-render: team/{num} site blobs embed each
+      team's full-history team_years and the team-blob change gate skips
+      them on partial cycles, so a historical reprocess MUST chain a full
+      current-year re-render or team blobs go stale (see the
+      REPROCESS_DRIVER note in the Makefile).
+
+    Runs synchronously in-request like reset_curr_year; minutes, acceptable
+    for the scheduled daily sweep."""
+    timer = Timer()
+    teams = load_teams_tba(cache=True)
+    process_year(year_num, False, False, True, teams, create_objs(year_num), None)
+    timer.print(f"{year_num} Reprocess")
+
+    if not DISABLE_DB:
+        import backfill_blobs
+
+        backfill_blobs.main([str(year_num), "--force"])
+        timer.print(f"{year_num} Hist Blobs")
+
+    update_curr_year(partial=False, tba_partial=False)
+    refresh_teams()
+    timer.print("Chained Curr-Year Re-render")
 
 
 def refresh_teams() -> Dict[str, int]:

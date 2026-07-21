@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Response
 
 from src.constants import BACKEND_URL, CURR_YEAR, DISABLE_DB
 from src.data.main import refresh_teams, reset_all_years, update_curr_year
+from src.data.sweep import revalidate_tba
 from src.data.tba import check_year_partial as check_year_partial_tba
 from src.db.read import get_etags as get_etags_db
 from src.db.read import get_events as get_events_db
@@ -21,16 +22,21 @@ async def read_root():
     return {"name": "Data Router"}
 
 
+# refresh_tba=true (TBA cache design §2.3 "manual force") bypasses the cache
+# manifest for the run: every TBA path is fetched unconditionally (etag-less)
+# and the cache archives are rebuilt. For known upstream corrections.
+
+
 @data_router.get("/reset_all_years")
-async def reset_all_years_endpoint():
+async def reset_all_years_endpoint(refresh_tba: bool = False):
     # return {"status": "skipped"}
-    reset_all_years()
+    reset_all_years(refresh_tba=refresh_tba)
     return {"status": "success"}
 
 
 @data_router.get("/reset_curr_year")
-async def reset_curr_year_endpoint():
-    update_curr_year(partial=False, tba_partial=False)
+async def reset_curr_year_endpoint(refresh_tba: bool = False):
+    update_curr_year(partial=False, tba_partial=False, refresh_tba=refresh_tba)
     refresh_teams()
     return {"status": "success"}
 
@@ -45,6 +51,16 @@ async def update_curr_year_endpoint():
 async def update_curr_year_debug_endpoint():
     update_curr_year(partial=True, tba_partial=False)
     return {"status": "success"}
+
+
+# Daily historical revalidation sweep (TBA cache design §2.3): the
+# statbotics-tba-sweep Cloud Scheduler job (05:30 UTC) GETs this once a day.
+# One historical year per hit, round-robin, serial conditional GETs; if the
+# year actually changed it is fully reprocessed in-request (minutes — same
+# in-request model as reset_curr_year). Synchronous and idempotent.
+@data_router.get("/revalidate_tba")
+async def revalidate_tba_endpoint():
+    return revalidate_tba()
 
 
 @data_router.get("/refresh_teams")

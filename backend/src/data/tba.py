@@ -5,6 +5,7 @@ from src.constants import CURR_YEAR
 from src.data.utils import objs_type
 from src.db.functions import remove_teams_with_no_events, update_team_districts
 from src.db.models import ETag, Event, Team, TeamEvent, TeamYear, match_dict_to_objs
+from src.tba import cache as tba_cache
 from src.tba.constants import DISTRICT_MAPPING
 from src.tba.read_tba import (
     EventDict,
@@ -23,12 +24,36 @@ from src.utils.utils import get_team_event_key, get_team_year_key
 
 OS = Optional[str]
 
+# Freshness tiers (TBA cache design §2.3). The active tier spans
+# start−1d .. end+EVENT_END_GRACE_DAYS: corrections cluster right after an
+# event, so the grace side is wider than the old +1d. Current-year manifest
+# entries outside the window revalidate at most once per day (the daily tier).
+EVENT_END_GRACE_DAYS = 3
+DAILY_REVALIDATION_HOURS = 24
+
+# The per-event cache-key URLs the daily tier revalidates (get_tba keys).
+_EVENT_TIER_SUFFIXES = ("/matches", "/rankings", "/alliances")
+
 """
 HELPER FUNCTIONS
 """
 
 
+def in_event_window(start_date: str, end_date: str, today: str) -> bool:
+    """Active-tier membership: start−1d <= today <= end+3d. Dates stay naive
+    UTC-less date strings compared lexically, exactly like the pre-tier code."""
+    start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)).strftime(
+        "%Y-%m-%d"
+    )
+    end = (
+        datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=EVENT_END_GRACE_DAYS)
+    ).strftime("%Y-%m-%d")
+    return start <= today <= end
+
+
 def load_teams(cache: bool = True) -> List[Team]:
+    # teams/{page} pickles + etags live in the global archive (design §2.1)
+    tba_cache.hydrate()
     teams = get_teams_tba(cache=cache)
     team_objs = [
         Team(
@@ -102,7 +127,7 @@ def check_year_partial(
         if start_date - timedelta(days=1) > datetime.now():
             continue
 
-        if end_date + timedelta(days=1) < datetime.now():
+        if end_date + timedelta(days=EVENT_END_GRACE_DAYS) < datetime.now():
             continue
 
         prev_etag = etags_dict.get(event_obj.key + "/matches", default_etag).etag
@@ -129,6 +154,7 @@ def check_year_partial(
         if qual_matches == 0 or current_match < qual_matches:
             continue
 
+        prev_etag = etags_dict.get(event_obj.key + "/alliances", default_etag).etag
         _, new_etag = get_event_alliances_tba(event_obj.key, prev_etag, cache=False)
         if new_etag != prev_etag and new_etag is not None:
             return True  # If any event has new alliances, return True
@@ -157,15 +183,32 @@ def process_year(
 
     T = TypeVar("T")
 
-    def call_tba(func: Callable[..., Tuple[T, OS]], path: str) -> Tuple[T, bool]:
+    def call_tba(
+        func: Callable[..., Tuple[T, OS]],
+        path: str,
+        revalidate: bool = False,
+        trust: bool = False,
+    ) -> Tuple[T, bool]:
         prev_etag = etags_dict.get(path, default_etag).etag
-        if partial:
+        if partial and not revalidate:
             out, new_etag = func(prev_etag, False)
-            if new_etag is not None:
-                new_etag_obj = ETag(year_num, path, new_etag)
-                new_etags_dict[new_etag_obj.pk()] = new_etag_obj
+        elif partial:
+            # Daily tier (design §2.3): manifest-backed conditional GET
+            # (etag=None + cache=False makes get_tba send the stored etag).
+            # A 304 serves the cached pickle — real data, not a bool — and a
+            # 200 returns fresh data; either way the event flows through the
+            # normal processing path below, so revalidation can never refresh
+            # the manifest while dropping the data.
+            out, new_etag = func(None, False)
         else:
-            out, new_etag = func(None, cache)
+            # Full mode. trust=True (current-year event outside the active
+            # window, validated within 24h) serves the pickle with zero TBA
+            # requests; otherwise get_tba's manifest-backed conditional GET
+            # revalidates — never more requests than the pre-tier refetch.
+            out, new_etag = func(None, cache or trust)
+        if partial and new_etag is not None:
+            new_etag_obj = ETag(year_num, path, new_etag)
+            new_etags_dict[new_etag_obj.pk()] = new_etag_obj
         return out, new_etag is not None and new_etag != prev_etag
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -219,18 +262,44 @@ def process_year(
             status=curr_status,
         )
 
+    full_curr_year = not partial and year_num == CURR_YEAR
+
     for event_obj in event_objs_dict.values():
-        if partial:
-            start = (
-                datetime.strptime(event_obj.start_date, "%Y-%m-%d") - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            end = (
-                datetime.strptime(event_obj.end_date, "%Y-%m-%d") + timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            if not (start <= today <= end) and event_obj.status != EventStatus.ONGOING:
+        event_key, event_time = event_obj.key, event_obj.time
+        event_active = (
+            in_event_window(event_obj.start_date, event_obj.end_date, today)
+            or event_obj.status == EventStatus.ONGOING
+        )
+
+        revalidate_event = False
+        if partial and not event_active:
+            # Daily tier (design §2.3): out-of-window current-year events
+            # whose manifest state has gone >24h without validation get one
+            # conditional-GET pass this cycle. Only events that already hold
+            # manifest etag state qualify, so a cold manifest adds zero
+            # requests, and each pass refreshes last_validated — the load
+            # spreads naturally across the day's cycles.
+            revalidate_event = any(
+                tba_cache.needs_revalidation(
+                    "event/" + event_key + suffix, DAILY_REVALIDATION_HOURS
+                )
+                for suffix in _EVENT_TIER_SUFFIXES
+            )
+            if not revalidate_event:
                 continue
 
-        event_key, event_time = event_obj.key, event_obj.time
+        def trust_path(suffix: str) -> bool:
+            # Completed tier (design §2.3): on full current-year runs, trust
+            # the pickle for out-of-window events validated within 24h.
+            # Active-window paths always revalidate; partial cycles and
+            # historical years are unaffected (trust is OR-ed with `cache`).
+            return (
+                full_curr_year
+                and not event_active
+                and tba_cache.validated_within(
+                    "event/" + event_key + suffix, DAILY_REVALIDATION_HOURS
+                )
+            )
 
         def get_event_matches_tba_year(
             etag: OS, cache: bool
@@ -238,7 +307,10 @@ def process_year(
             return get_event_matches_tba(year_num, event_key, event_time, etag, cache)
 
         matches, matches_changed = call_tba(
-            get_event_matches_tba_year, event_key + "/matches"
+            get_event_matches_tba_year,
+            event_key + "/matches",
+            revalidate=revalidate_event,
+            trust=trust_path("/matches"),
         )
 
         event_teams: Set[int] = set()
@@ -259,7 +331,11 @@ def process_year(
                 # event is closer than previous closest event
                 team_first_event_dict[team] = (event_key, event_week)
 
-        if partial and not matches_changed:
+        # Daily-tier events skip this shortcut even when matches are
+        # unchanged: their stale rankings/alliances entries still need the
+        # conditional GETs below, and the 304-served pickle data makes the
+        # normal path recompute the same objects.
+        if partial and not matches_changed and not revalidate_event:
             for te in team_event_objs_dict.values():
                 if te.event == event_key:
                     add_team_event(te.team)
@@ -277,7 +353,10 @@ def process_year(
                 return get_event_teams_tba(event_key, etag, cache)
 
             temp_event_teams, _ = call_tba(
-                get_event_teams_tba_year, event_key + "/teams"
+                get_event_teams_tba_year,
+                event_key + "/teams",
+                revalidate=revalidate_event,
+                trust=trust_path("/teams/simple"),
             )
 
             for team in temp_event_teams:
@@ -296,7 +375,10 @@ def process_year(
                 return get_event_rankings_tba(event_key, etag, cache)
 
             raw_rankings, _ = call_tba(
-                get_event_rankings_tba_year, event_key + "/rankings"
+                get_event_rankings_tba_year,
+                event_key + "/rankings",
+                revalidate=revalidate_event,
+                trust=trust_path("/rankings"),
             )
             if raw_rankings is not True:
                 rankings = raw_rankings
@@ -307,7 +389,10 @@ def process_year(
                 return get_event_alliances_tba(event_key, etag, cache)
 
             raw_alliances, _ = call_tba(
-                get_event_alliances_tba_year, event_key + "/alliances"
+                get_event_alliances_tba_year,
+                event_key + "/alliances",
+                revalidate=revalidate_event,
+                trust=trust_path("/alliances"),
             )
             if raw_alliances is not True:
                 alliance_dict, captain_dict = raw_alliances

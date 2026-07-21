@@ -241,6 +241,18 @@ step_scheduler() {
     --attempt-deadline=1800s \
     --description="Hourly offseason update_curr_year (etag precheck + backgrounded partial)" \
     2>/dev/null || true
+  # Daily TBA historical revalidation sweep (cache design §2.3): one
+  # round-robin year per day, serial conditional GETs; reprocesses the year
+  # in-request when anything changed. 05:30 UTC offsets it from the hourly
+  # update (on the hour) and statbotics-gc (04:30); 1800s is Cloud
+  # Scheduler's max attempt-deadline — a longer reprocess continues
+  # server-side even if the scheduler stops waiting.
+  gc scheduler jobs create http statbotics-tba-sweep \
+    --location="$REGION" --schedule="30 5 * * *" \
+    --uri="$api_url/v3/data/revalidate_tba" --http-method=GET \
+    --attempt-deadline=1800s \
+    --description="Daily TBA historical revalidation sweep (one year, serial; reprocess on change)" \
+    2>/dev/null || true
 }
 
 step_dns() {

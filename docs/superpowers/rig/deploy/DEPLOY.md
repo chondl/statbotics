@@ -8,7 +8,8 @@ prefer `make <target>` over ad-hoc `gcloud`. Full-history rebuilds are in
 Mirror: <https://statbotics.iterativerefinement.com> · API: <https://api-statbotics.iterativerefinement.com>
 GCP project `statbotics-staging` · Cloud Run services `statbotics-api` / `statbotics-web` ·
 Cloud SQL Postgres `statbotics-staging-db` · GCS bucket `statbotics-staging-site` ·
-Cloud Scheduler `statbotics-update` (hourly) + `statbotics-gc` (daily).
+Cloud Scheduler `statbotics-update` (hourly) + `statbotics-gc` (daily 04:30 UTC) +
+`statbotics-tba-sweep` (daily 05:30 UTC — one historical year's TBA revalidation).
 Serving is DuckDB-over-Parquet (`API_BACKEND=duckdb`); the DB is still written each
 cycle and is the fallback. Cloudflare Workers front both services + the blob bucket.
 
