@@ -372,7 +372,15 @@ def get_team_event_teams() -> Set[int]:
         cursor.execute(sql)
     except duckdb.IOException as e:
         if "No files found" in str(e):
-            return set()
+            # An empty glob is NOT an authoritative "no TeamEvents exist" —
+            # a bucket missing its team_events Parquet would otherwise prune
+            # every historical-only team. Raise so the caller takes its
+            # read-failure path (skip the prune for the cycle); never return
+            # an empty authoritative set.
+            raise RuntimeError(
+                "no team_events Parquet files found; refusing to treat as an "
+                "empty TeamEvent set (would prune every historical team)"
+            ) from e
         raise
     return {row[0] for row in cursor.fetchall()}
 

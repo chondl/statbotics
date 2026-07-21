@@ -38,6 +38,12 @@ from src.tba.clean_data import clean_district
 # partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
 db_less_seed_incomplete = False
 
+# Set true when a db-less full cycle skipped publish_curr_year because its
+# teams never went through post_process (the all-years team_years read
+# failed); cleared when a later full cycle publishes successfully. Surfaced
+# via /info so it is not silent.
+db_less_publish_skipped = False
+
 
 @contextmanager
 def _tba_force_refresh(refresh_tba: bool) -> Iterator[None]:
@@ -339,9 +345,8 @@ def _update_curr_year(partial: bool, tba_partial: bool):
         # them has not happened yet; in DB mode the rows are identical (they
         # were just written from these very objects). Prior years come from
         # the backend (DB or Parquet). If that read fails, skip post_process
-        # rather than publish half-computed career fields — the publish still
-        # runs with cycle-start team rows (yesterday's values, not wrong
-        # ones).
+        # rather than publish half-computed career fields — and what happens
+        # next depends on the mode (see the invariant below).
         all_team_years: Optional[Dict[int, Dict[int, TeamYear]]] = None
         try:
             prior_tys = get_team_years_db()
@@ -349,7 +354,7 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             traceback.print_exc()
             print(
                 "WARNING: all-years team_years unavailable; skipping post_process "
-                "this cycle (publishing cycle-start team fields)"
+                "this cycle"
             )
             prior_tys = None
         if prior_tys is not None:
@@ -360,7 +365,29 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             all_team_years[year] = {ty.team: ty for ty in objs[1].values()}
             teams = post_process(teams, all_team_years)
 
-        publish_curr_year(objs, teams)
+        global db_less_publish_skipped
+        if DISABLE_DB and prior_tys is None:
+            # INVARIANT (DB retirement Phase 1): db-less, a full cycle may
+            # only publish teams that went through post_process. Here the
+            # teams list is fresh from load_teams_tba — career records,
+            # norm_epa, active, last_active_year, district all empty — and
+            # publishing it would clobber good published blobs, the teams
+            # Parquet, AND the snapshot partial cycles resume from. Skip the
+            # publish; the next successful full cycle republishes everything.
+            # (DB mode publishes anyway: its teams came from the DB with
+            # post-processed fields already set — yesterday's values, not
+            # wrong ones — and reload fresh from the DB next cycle.)
+            db_less_publish_skipped = True
+            print(
+                "ERROR: db-less full cycle SKIPPING publish_curr_year — teams "
+                "never went through post_process (all-years team_years read "
+                "failed), so publishing would clobber good artifacts with "
+                "empty career fields. Surfaced via /info "
+                "DB_LESS_PUBLISH_SKIPPED."
+            )
+        else:
+            publish_curr_year(objs, teams)
+            db_less_publish_skipped = False
 
 
 def reprocess_year(year_num: int) -> None:

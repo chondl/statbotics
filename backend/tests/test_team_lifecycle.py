@@ -325,6 +325,76 @@ def test_full_cycle_db_mode_still_writes_db_and_publishes_last(monkeypatch):
     assert {t.team: t for t in h.published_teams()}[254].norm_epa == 1800.0
 
 
+# ----------------- full-cycle failure paths (clobber guards) ------------------
+
+
+def _raise(*args: Any, **kw: Any) -> Any:
+    raise RuntimeError("backend read unavailable")
+
+
+def test_full_cycle_dbless_team_years_failure_skips_publish(monkeypatch):
+    # Invariant: db-less, a full cycle may only publish teams that went
+    # through post_process. If the all-years team_years read fails, the teams
+    # list is fresh from load_teams_tba (career fields empty) and publishing
+    # would clobber good blobs and the snapshot — so nothing is published.
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    monkeypatch.setattr(data_main, "get_team_years_db", _raise)
+    monkeypatch.setattr(data_main, "db_less_publish_skipped", False)
+    h.run_full_cycle()
+
+    # publish_curr_year never ran: prior published artifacts (snapshot,
+    # Parquet, site blobs in the fake GCS recorders) are untouched.
+    assert h.snapshot_calls == []
+    assert h.storage_calls == []
+    # Degradation is loud: surfaced via /info DB_LESS_PUBLISH_SKIPPED.
+    assert data_main.db_less_publish_skipped is True
+
+
+def test_full_cycle_dbless_successful_publish_clears_skip_flag(monkeypatch):
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    monkeypatch.setattr(data_main, "db_less_publish_skipped", True)
+    h.run_full_cycle()
+    assert len(h.storage_calls) == 1
+    assert data_main.db_less_publish_skipped is False
+
+
+def test_full_cycle_db_mode_team_years_failure_still_publishes(monkeypatch):
+    # DB mode keeps current behavior: post_process is skipped but the publish
+    # still runs — teams came from the DB with post-processed fields already
+    # set (yesterday's values, not wrong ones) and reload next cycle.
+    h = PipelineHarness(monkeypatch, disable_db=False)
+    monkeypatch.setattr(data_main, "get_team_years_db", _raise)
+    monkeypatch.setattr(data_main, "db_less_publish_skipped", False)
+    h.run_full_cycle()
+
+    assert "update_teams_db" not in h.events  # post_process skipped
+    assert len(h.storage_calls) == 1  # publish still ran
+    assert data_main.db_less_publish_skipped is False
+
+
+def test_publish_prune_skipped_when_stored_team_events_unreadable(monkeypatch):
+    # If the stored TeamEvent set cannot be read, the no-event prune is
+    # skipped for the cycle: every team is kept (999 included), never pruned
+    # from an unreadable-as-empty set.
+    h = PipelineHarness(monkeypatch, disable_db=True)
+    monkeypatch.setattr(data_main, "get_team_event_teams_db", _raise)
+    h.run_full_cycle()
+
+    assert {t.team for t in h.published_teams()} == {254, 148, 999}
+
+
+def test_duckdb_team_event_teams_empty_glob_raises(monkeypatch, tmp_path):
+    # A missing/empty team_events Parquet glob must raise (feeding the
+    # skip-prune path above), never return an authoritative empty set.
+    import pytest
+
+    import src.db_duckdb.main as duck
+
+    monkeypatch.setattr(duck, "_sync", lambda: str(tmp_path))
+    with pytest.raises(RuntimeError, match="no team_events Parquet"):
+        duck.get_team_event_teams()
+
+
 # ------------------------- refresh_teams (both modes) -------------------------
 
 
