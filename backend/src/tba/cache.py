@@ -33,6 +33,12 @@ MANIFEST_NAME = "manifest.json"
 # metadata-only change. Stripped from the url manifest on hydrate.
 ARCHIVE_META_KEY = "__archive__"
 
+# Reserved manifest key (global archive only) carrying the historical
+# sweep's round-robin cursor: {"next_year": "2013"} — the next year
+# /v3/data/revalidate_tba will sweep (design §2.3). Stripped on hydrate,
+# like ARCHIVE_META_KEY.
+SWEEP_CURSOR_KEY = "__sweep__"
+
 # Metadata-only dirtiness (a 304 refreshing last_validated) re-uploads an
 # archive at most this often. last_validated is an optimization hint: losing
 # a few hours of it costs extra 304s, never correctness.
@@ -45,6 +51,7 @@ _dirty: Set[str] = set()  # content-dirty: pickle written / etag changed
 _meta_dirty: Set[str] = set()  # only last_validated changed (debounced)
 _meta_persisted: Dict[str, str] = {}  # archive -> last metadata upload (iso)
 _blocked: Set[str] = set()  # hydrate errored (not just missing): never persist
+_sweep_cursor: Optional[int] = None  # next historical year the sweep visits
 
 # REFRESH_TBA force flag (design §2.3 "manual force"): set per-run by the
 # reset endpoints' refresh_tba query param (src/data/main.py scopes it).
@@ -56,12 +63,14 @@ _YEAR_PREFIX_RE = re.compile(r"^(\d{4})")
 
 def reset_state() -> None:
     """Clear all process-local cache state (tests)."""
+    global _sweep_cursor
     _manifest.clear()
     _hydrated.clear()
     _dirty.clear()
     _meta_dirty.clear()
     _meta_persisted.clear()
     _blocked.clear()
+    _sweep_cursor = None
     set_force_refresh(False)
 
 
@@ -166,6 +175,37 @@ def record_success(url: str, etag: Optional[str]) -> None:
     _dirty.add(archive_for(url))
 
 
+def manifest_paths(archive: str) -> List[str]:
+    """Sorted cache-key URLs the manifest tracks for one archive (the daily
+    sweep's work list for a year)."""
+    return sorted(url for url in _manifest if archive_for(url) == archive)
+
+
+def sweep_cursor() -> Optional[int]:
+    """The next historical year the daily sweep should visit, or None when
+    no cursor has ever been stored (first run: start at the oldest year)."""
+    return _sweep_cursor
+
+
+def set_sweep_cursor(year: int) -> None:
+    """Advance the sweep cursor. Content-dirties the global archive so the
+    next persist() always uploads it — the cursor must survive process
+    restarts or the round-robin would revisit the same year."""
+    global _sweep_cursor
+    _sweep_cursor = year
+    _dirty.add(GLOBAL_ARCHIVE)
+
+
+def _hydrate_sweep_cursor(entry: Dict[str, str]) -> None:
+    global _sweep_cursor
+    if _sweep_cursor is not None:
+        return  # a cursor set this process is fresher than the archive's
+    try:
+        _sweep_cursor = int(entry.get("next_year", ""))
+    except (TypeError, ValueError):
+        pass
+
+
 def record_not_modified(url: str, etag: Optional[str]) -> None:
     """A 304 confirmed the request etag. Refresh last_validated only when
     that etag is the one we have stored (the pickle's etag) — a 304 against
@@ -191,6 +231,8 @@ def pack_archive(name: str, root: str) -> bytes:
     }
     if name in _meta_persisted:
         manifest[ARCHIVE_META_KEY] = {"meta_persisted": _meta_persisted[name]}
+    if name == GLOBAL_ARCHIVE and _sweep_cursor is not None:
+        manifest[SWEEP_CURSOR_KEY] = {"next_year": str(_sweep_cursor)}
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for dirpath, _dirs, files in os.walk(root):
             if "data.p" not in files:
@@ -293,6 +335,9 @@ def hydrate(year: Optional[int] = None) -> None:
                 meta = manifest.pop(ARCHIVE_META_KEY, None)
                 if meta is not None and "meta_persisted" in meta:
                     _meta_persisted.setdefault(name, meta["meta_persisted"])
+                cursor = manifest.pop(SWEEP_CURSOR_KEY, None)
+                if cursor is not None and name == GLOBAL_ARCHIVE:
+                    _hydrate_sweep_cursor(cursor)
                 # Entries recorded this process are fresher than the archive.
                 for url, entry in manifest.items():
                     _manifest.setdefault(url, entry)
@@ -357,6 +402,7 @@ __all__: List[str] = [
     "extract_archive",
     "force_refresh",
     "hydrate",
+    "manifest_paths",
     "needs_revalidation",
     "pack_archive",
     "persist",
@@ -364,6 +410,8 @@ __all__: List[str] = [
     "record_success",
     "reset_state",
     "set_force_refresh",
+    "set_sweep_cursor",
     "stored_etag",
+    "sweep_cursor",
     "validated_within",
 ]

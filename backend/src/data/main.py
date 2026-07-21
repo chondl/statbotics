@@ -278,6 +278,41 @@ def _update_curr_year(partial: bool, tba_partial: bool):
         post_process(teams, None)
 
 
+def reprocess_year(year_num: int) -> None:
+    """Full single-year historical reprocess for the daily TBA sweep
+    (design §2.3), mirroring the `reprocess-year` job driver in
+    docs/superpowers/rig/deploy/Makefile:
+
+    - process_year(partial=False, cache=True): re-ingests the year from the
+      freshly revalidated pickles (zero further TBA traffic for validated
+      paths), recomputes EPA with the prior-4-year team_years seeding read
+      inside process_year (all_team_years=None), rewrites the year's DB rows
+      (write_objs clean=True clears first) and republishes its Parquet.
+    - backfill_blobs: republishes the year's hist/ site blobs from the DB.
+    - Chained full current-year re-render: team/{num} site blobs embed each
+      team's full-history team_years and the team-blob change gate skips
+      them on partial cycles, so a historical reprocess MUST chain a full
+      current-year re-render or team blobs go stale (see the
+      REPROCESS_DRIVER note in the Makefile).
+
+    Runs synchronously in-request like reset_curr_year; minutes, acceptable
+    for the scheduled daily sweep."""
+    timer = Timer()
+    teams = load_teams_tba(cache=True)
+    process_year(year_num, False, False, True, teams, create_objs(year_num), None)
+    timer.print(f"{year_num} Reprocess")
+
+    if not DISABLE_DB:
+        import backfill_blobs
+
+        backfill_blobs.main([str(year_num), "--force"])
+        timer.print(f"{year_num} Hist Blobs")
+
+    update_curr_year(partial=False, tba_partial=False)
+    refresh_teams()
+    timer.print("Chained Curr-Year Re-render")
+
+
 def refresh_teams() -> Dict[str, int]:
     """Refresh all stale team fields from TBA and recompute win records."""
     if DISABLE_DB:
