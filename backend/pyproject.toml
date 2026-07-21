@@ -27,6 +27,7 @@ google-cloud-storage = "^3.1.0"
 duckdb = "^1.5.4"
 pyarrow = "^20.0.0"
 zstandard = "^0.23"
+orjson = "^3.10"
 
 [tool.poetry.group.dev.dependencies]
 pyinstrument = "^4.6.1"
