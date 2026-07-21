@@ -39,8 +39,11 @@ def get_tba(
     url: str, etag: Optional[str] = None, cache: bool = True
 ) -> Tuple[Union[Any, bool], Optional[str]]:
     cache_path = os.path.join(TBA_CACHE_DIR, url)
+    # REFRESH_TBA (design §2.3): bypass every cache/etag layer — the fetch is
+    # unconditional and the 200 below rebuilds the pickle + manifest state.
+    force = tba_cache.force_refresh()
     has_pickle = os.path.exists(cache_path + "/data.p")
-    if cache and has_pickle:
+    if cache and has_pickle and not force:
         # Cache Hit: no network, no manifest change
         return load_cache(cache_path), None
 
@@ -48,9 +51,9 @@ def get_tba(
     # no etag and the cached pickle exists to satisfy a 304, revalidate with
     # the stored etag instead of refetching unconditionally. Explicit-etag
     # callers (partial cycles) are untouched — dual-write with objs[5]/DB.
-    send_etag = etag
+    send_etag = None if force else etag
     from_manifest = False
-    if etag is None and has_pickle:
+    if not force and etag is None and has_pickle:
         send_etag = tba_cache.stored_etag(url)
         from_manifest = send_etag is not None
 

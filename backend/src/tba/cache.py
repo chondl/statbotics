@@ -34,6 +34,10 @@ _hydrated: Set[str] = set()  # archive names already hydrated this process
 _dirty: Set[str] = set()  # archive names needing persist
 _blocked: Set[str] = set()  # hydrate errored (not just missing): never persist
 
+# REFRESH_TBA force flag (design §2.3 "manual force"): set per-run by the
+# reset endpoints' refresh_tba query param (src/data/main.py scopes it).
+_force_refresh: bool = False
+
 _YEAR_RE = re.compile(r"^\d{4}$")
 _YEAR_PREFIX_RE = re.compile(r"^(\d{4})")
 
@@ -44,6 +48,20 @@ def reset_state() -> None:
     _hydrated.clear()
     _dirty.clear()
     _blocked.clear()
+    set_force_refresh(False)
+
+
+def set_force_refresh(on: bool) -> None:
+    global _force_refresh
+    _force_refresh = on
+
+
+def force_refresh() -> bool:
+    """True when every get_tba call must bypass cache and etags entirely:
+    the per-run flag (refresh_tba query param on the reset endpoints) or
+    REFRESH_TBA=1 in the process environment (covers job drivers that call
+    process_year directly, e.g. the reprocess-year Cloud Run job)."""
+    return _force_refresh or os.getenv("REFRESH_TBA", "") == "1"
 
 
 def archive_for(url: str) -> str:
@@ -297,6 +315,7 @@ def persist() -> None:
 __all__: List[str] = [
     "archive_for",
     "extract_archive",
+    "force_refresh",
     "hydrate",
     "needs_revalidation",
     "pack_archive",
@@ -304,6 +323,7 @@ __all__: List[str] = [
     "record_not_modified",
     "record_success",
     "reset_state",
+    "set_force_refresh",
     "stored_etag",
     "validated_within",
 ]

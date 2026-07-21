@@ -1,7 +1,8 @@
 from collections import defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 import traceback
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from src.constants import CURR_YEAR, DISABLE_DB, DISABLE_GCS
 from src.data.avg import process_year as process_year_avg
@@ -47,6 +48,22 @@ from src.tba import cache as tba_cache
 # Set true when a db-less cross-season EPA seed found no prior-year data (a
 # partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
 db_less_seed_incomplete = False
+
+
+@contextmanager
+def _tba_force_refresh(refresh_tba: bool) -> Iterator[None]:
+    """Scope the REFRESH_TBA force flag (TBA cache design §2.3) to one
+    pipeline run: when set, every get_tba call fetches unconditionally
+    (etag-less) and the archives are rebuilt from the responses. Always
+    cleared afterward so later runs in this process are not forced. The
+    REFRESH_TBA=1 env var is honored independently inside
+    tba_cache.force_refresh() (it covers job drivers calling process_year
+    directly)."""
+    tba_cache.set_force_refresh(refresh_tba)
+    try:
+        yield
+    finally:
+        tba_cache.set_force_refresh(False)
 
 
 def process_year(
@@ -173,7 +190,12 @@ def post_process(
         timer.print("Post TBA")
 
 
-def reset_all_years():
+def reset_all_years(refresh_tba: bool = False):
+    with _tba_force_refresh(refresh_tba):
+        _reset_all_years()
+
+
+def _reset_all_years():
     timer = Timer()
 
     start_year = 2002
@@ -204,7 +226,12 @@ def reset_all_years():
     tba_cache.persist()
 
 
-def update_curr_year(partial: bool, tba_partial: bool):
+def update_curr_year(partial: bool, tba_partial: bool, refresh_tba: bool = False):
+    with _tba_force_refresh(refresh_tba):
+        _update_curr_year(partial, tba_partial)
+
+
+def _update_curr_year(partial: bool, tba_partial: bool):
     year = CURR_YEAR
     timer = Timer()
 

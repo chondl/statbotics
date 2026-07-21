@@ -21,16 +21,21 @@ async def read_root():
     return {"name": "Data Router"}
 
 
+# refresh_tba=true (TBA cache design §2.3 "manual force") bypasses the cache
+# manifest for the run: every TBA path is fetched unconditionally (etag-less)
+# and the cache archives are rebuilt. For known upstream corrections.
+
+
 @data_router.get("/reset_all_years")
-async def reset_all_years_endpoint():
+async def reset_all_years_endpoint(refresh_tba: bool = False):
     # return {"status": "skipped"}
-    reset_all_years()
+    reset_all_years(refresh_tba=refresh_tba)
     return {"status": "success"}
 
 
 @data_router.get("/reset_curr_year")
-async def reset_curr_year_endpoint():
-    update_curr_year(partial=False, tba_partial=False)
+async def reset_curr_year_endpoint(refresh_tba: bool = False):
+    update_curr_year(partial=False, tba_partial=False, refresh_tba=refresh_tba)
     refresh_teams()
     return {"status": "success"}
 

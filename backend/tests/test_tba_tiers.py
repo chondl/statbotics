@@ -2,15 +2,20 @@
 
 Covers: the active-window math (start−1d .. end+3d, naive date-string
 compare), the widened check_year_partial probe window, the daily
-revalidation tier in partial cycles, and trust-cache semantics for full
-current-year rebuilds. No real TBA or GCS access.
+revalidation tier in partial cycles, trust-cache semantics for full
+current-year rebuilds, and the REFRESH_TBA force flag. No real TBA or GCS
+access.
 """
 
+import os
+import pickle
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import src.data.main as data_main
 import src.data.tba as data_tba
 import src.tba.cache as tba_cache
+import src.tba.main as tba_main
 from src.constants import CURR_YEAR
 from src.db.models import ETag, Event, Year
 from src.tba.types import empty_breakdown
@@ -350,3 +355,80 @@ def test_reset_historical_year_keeps_plain_cache(monkeypatch):
     data_tba.process_year(year, [], _objs(event), partial=False, cache=True)
 
     assert fakes.named("matches:" + key) == [("matches:" + key, None, True)]
+
+
+"""
+5. REFRESH_TBA force flag: unconditional, etag-less fetches for the run
+"""
+
+
+def test_force_refresh_bypasses_cache_and_etag(tmp_path, monkeypatch):
+    monkeypatch.setattr(tba_main, "TBA_CACHE_DIR", str(tmp_path))
+    url = "event/2026iri/matches"
+    path = os.path.join(str(tmp_path), url)
+    os.makedirs(path)
+    with open(os.path.join(path, "data.p"), "wb") as f:
+        pickle.dump(["cached"], f)
+    tba_cache._manifest[url] = {
+        "etag": 'W/"old"',
+        "last_validated": "2026-07-20T00:00:00Z",
+    }
+    sent = {}
+
+    def fake(u, etag=None):
+        sent["etag"] = etag
+        return ["fresh"], 'W/"new"'
+
+    monkeypatch.setattr(tba_main, "_get_tba", fake)
+    tba_cache.set_force_refresh(True)
+
+    data, etag = tba_main.get_tba(url, etag=None, cache=True)
+
+    assert data == ["fresh"] and etag == 'W/"new"'
+    assert sent["etag"] is None  # unconditional: no If-None-Match
+    assert tba_cache.stored_etag(url) == 'W/"new"'  # archive state rebuilt
+    with open(os.path.join(path, "data.p"), "rb") as f:
+        assert pickle.load(f) == ["fresh"]
+
+
+def test_force_refresh_env_var(monkeypatch):
+    monkeypatch.delenv("REFRESH_TBA", raising=False)
+    assert tba_cache.force_refresh() is False
+    monkeypatch.setenv("REFRESH_TBA", "1")
+    assert tba_cache.force_refresh() is True
+
+
+def test_reset_state_clears_force_flag():
+    tba_cache.set_force_refresh(True)
+    tba_cache.reset_state()
+    assert tba_cache.force_refresh() is False
+
+
+def test_update_curr_year_scopes_force_flag(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        data_main,
+        "_update_curr_year",
+        lambda partial, tba_partial: seen.setdefault(
+            "forced", tba_cache.force_refresh()
+        ),
+    )
+
+    data_main.update_curr_year(partial=False, tba_partial=False, refresh_tba=True)
+
+    assert seen["forced"] is True
+    assert tba_cache.force_refresh() is False  # cleared after the run
+
+
+def test_reset_all_years_scopes_force_flag(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        data_main,
+        "_reset_all_years",
+        lambda: seen.setdefault("forced", tba_cache.force_refresh()),
+    )
+
+    data_main.reset_all_years(refresh_tba=True)
+
+    assert seen["forced"] is True
+    assert tba_cache.force_refresh() is False
