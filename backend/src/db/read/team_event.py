@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from sqlalchemy.orm.session import Session as SessionType
 
@@ -17,6 +17,20 @@ def get_team_event(team: int, event: str) -> Optional[TeamEvent]:
         if out_data is None:
             return None
         return TeamEvent.from_dict(out_data.__dict__)
+
+    return run_transaction(Session, callback)  # type: ignore
+
+
+def get_team_event_teams() -> Set[int]:
+    """Distinct team numbers with at least one TeamEvent across all years —
+    the same set remove_teams_with_no_events queries (DB retirement Phase 1:
+    feeds the publish-time no-event prune)."""
+
+    def callback(session: SessionType):
+        return {
+            x[0]
+            for x in session.query(TeamEventORM.team).group_by(TeamEventORM.team).all()
+        }
 
     return run_transaction(Session, callback)  # type: ignore
 

@@ -79,6 +79,7 @@ def get_info():
         "CONN_STR": "REDACTED" if PROD else CONN_STR,
         "PYTHON_VERSION": platform.python_version(),
         "DB_LESS_SEED_INCOMPLETE": data_main.db_less_seed_incomplete,
+        "DB_LESS_PUBLISH_SKIPPED": data_main.db_less_publish_skipped,
     }
 
 

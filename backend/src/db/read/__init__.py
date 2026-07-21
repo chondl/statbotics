@@ -2,7 +2,7 @@ from src.db.read.etag import get_etags
 from src.db.read.event import get_event, get_events
 from src.db.read.match import get_match, get_matches
 from src.db.read.team import get_team, get_teams
-from src.db.read.team_event import get_team_event, get_team_events
+from src.db.read.team_event import get_team_event, get_team_event_teams, get_team_events
 from src.db.read.team_year import get_team_year, get_team_years
 from src.db.read.year import get_year, get_years
 
@@ -13,6 +13,7 @@ __all__ = [
     "get_match",
     "get_matches",
     "get_team_event",
+    "get_team_event_teams",
     "get_team_events",
     "get_team_year",
     "get_team_years",

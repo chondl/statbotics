@@ -1,23 +1,20 @@
+import gzip
+import os
+import zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-import gzip
-import os
 from typing import Any, Callable, Dict, List, Optional, Set, TypeVar
-import zlib
 
-from google.cloud import storage
 import orjson
 
+from google.cloud import storage
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
-from src.data.backend import (
-    get_events as get_events_db,
-    get_team_years as get_team_years_db,
-    get_teams as get_teams_db,
-)
+from src.data.backend import get_events as get_events_db
+from src.data.backend import get_team_years as get_team_years_db
+from src.data.backend import get_teams as get_teams_db
 from src.data.utils import nan_safe_eq, objs_type
 from src.db.models.team import Team
-from src.site.backend import get_noteworthy_matches, get_upcoming_matches
 from src.google.publish import (
     MANIFEST_OBJECT,
     VERSION_PREFIX,
@@ -28,7 +25,8 @@ from src.google.publish import (
     plan_uploads,
     versioned_key,
 )
-from src.site.event import _read_all_events, _read_events, _read_event
+from src.site.backend import get_noteworthy_matches, get_upcoming_matches
+from src.site.event import _read_all_events, _read_event, _read_events
 from src.site.match import _read_noteworthy_matches, _read_upcoming_matches
 from src.site.team import _read_all_teams, _read_team
 from src.site.team_year import _read_team_years
@@ -331,6 +329,49 @@ def write_objs(
     _publish(plan)
 
     return
+
+
+def publish_team_artifacts(
+    teams: List[Team], changed_nums: Set[int], all_team_years: List[Any]
+) -> None:
+    """Targeted publish for db-less refresh_teams (DB retirement Phase 1 item
+    4): renders teams/all plus team/{num} for exactly changed_nums, folds the
+    current-year teams Parquet table into the same manifest write, and carries
+    every other blob forward untouched. One manifest write, same invariants as
+    write_objs (versioned uploads first, manifest last)."""
+    # Local import: parquet.py imports this module at load time.
+    from src.db.models.team import TeamORM
+    from src.google.parquet import parquet_logical, serialize_table
+
+    rendered: Dict[str, bytes] = {"teams/all": compress(_read_all_teams(teams))}
+
+    team_years_by_team: Dict[int, List[Any]] = defaultdict(list)
+    for ty in all_team_years:
+        team_years_by_team[ty.team].append(ty)
+    teams_by_num = {t.team: t for t in teams}
+    for num in changed_nums:
+        team_obj = teams_by_num.get(num)
+        if team_obj is None:
+            continue
+        rendered[f"team/{num}"] = compress(
+            _read_team(team_obj, team_years_by_team.get(num, []))
+        )
+
+    prev = read_manifest()
+    cycle = datetime.now(timezone.utc).isoformat()
+    plan = plan_uploads(rendered, prev, cycle, hist_epoch=HIST_EPOCH)
+
+    prev_manifest = prev or Manifest()
+    logical = parquet_logical(CURR_YEAR, "teams")
+    team_rows: List[Any] = list(teams)
+    data = serialize_table(team_rows, TeamORM)
+    digest = content_hash(data)
+    key = versioned_key(logical, digest)
+    if prev_manifest.hash_for(logical) != digest:
+        plan.uploads[key] = data
+    plan.manifest.blobs[logical] = key
+
+    _publish(plan)
 
 
 def gc_versioned_blobs(
