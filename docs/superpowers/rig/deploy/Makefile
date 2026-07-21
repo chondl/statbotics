@@ -20,9 +20,11 @@
 #   make smoke
 
 # DANGER — never dry-run with `make -n` here: with .ONESHELL, any recipe that
-# mentions $(MAKE) (e.g. reprocess-year's resume-cron chain) is EXECUTED in
-# full even under -n. A `make -n reprocess-year YEAR=…` really runs the job.
-# (This bit us on 2026-07-21: an intended dry run cleared+reprocessed 2025.)
+# mentions $(MAKE) is EXECUTED in full even under -n. (This bit us on
+# 2026-07-21: an intended dry run cleared+reprocessed 2025.) No recipe uses
+# $(MAKE) anymore — resume-cron is inlined in reprocess-year, which ALSO fixes
+# a second bug: $(MAKE) submakes do not inherit -f, so the chained resume
+# silently failed and left all four schedulers paused. Keep it that way.
 SHELL := /bin/bash
 .ONESHELL:
 
@@ -187,12 +189,14 @@ reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-
 	$(GC) run jobs create $(JOB_NAME) \
 	  --image $(IMAGE_API) --region $(REGION) \
 	  --set-cloudsql-instances $(CONN_NAME) \
-	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)|DATABASE_URL=$(DATABASE_URL)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))$(if $(DISABLE_DB),|DISABLE_DB=$(DISABLE_DB))" \
+	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)|DATABASE_URL=$(DATABASE_URL)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))|DISABLE_DB=$(or $(DISABLE_DB),True)" \
 	  --set-secrets "TBA_AUTH_KEY=tba-auth-key:latest,PGPASSWORD=db-password:latest" \
 	  --command python --args "^@@@^-c@@@$(REPROCESS_DRIVER)" \
 	  --cpu 2 --memory $(API_MEMORY) --task-timeout 3600 --max-retries 0; \
 	$(GC) run jobs execute $(JOB_NAME) --region $(REGION) --wait; \
-	$(MAKE) resume-cron
+	for j in $(UPDATE_SCHED) $(GC_SCHED) $(TBA_SWEEP_SCHED) $(REFRESH_TEAMS_SCHED); do \
+	  $(GC) scheduler jobs resume $$j --location $(REGION) || true; \
+	done
 
 # --------------------------------- SCHEDULER ---------------------------------
 # Pause the hourly update + daily GC around a manual data rebuild so their
