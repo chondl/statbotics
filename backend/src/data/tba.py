@@ -24,9 +24,32 @@ from src.utils.utils import get_team_event_key, get_team_year_key
 
 OS = Optional[str]
 
+# Freshness tiers (TBA cache design §2.3). The active tier spans
+# start−1d .. end+EVENT_END_GRACE_DAYS: corrections cluster right after an
+# event, so the grace side is wider than the old +1d. Current-year manifest
+# entries outside the window revalidate at most once per day (the daily tier).
+EVENT_END_GRACE_DAYS = 3
+DAILY_REVALIDATION_HOURS = 24
+
+# The per-event cache-key URLs the daily tier revalidates (get_tba keys).
+_EVENT_TIER_SUFFIXES = ("/matches", "/rankings", "/alliances")
+
 """
 HELPER FUNCTIONS
 """
+
+
+def in_event_window(start_date: str, end_date: str, today: str) -> bool:
+    """Active-tier membership: start−1d <= today <= end+3d. Dates stay naive
+    UTC-less date strings compared lexically, exactly like the pre-tier code."""
+    start = (
+        datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    end = (
+        datetime.strptime(end_date, "%Y-%m-%d")
+        + timedelta(days=EVENT_END_GRACE_DAYS)
+    ).strftime("%Y-%m-%d")
+    return start <= today <= end
 
 
 def load_teams(cache: bool = True) -> List[Team]:
@@ -105,7 +128,7 @@ def check_year_partial(
         if start_date - timedelta(days=1) > datetime.now():
             continue
 
-        if end_date + timedelta(days=1) < datetime.now():
+        if end_date + timedelta(days=EVENT_END_GRACE_DAYS) < datetime.now():
             continue
 
         prev_etag = etags_dict.get(event_obj.key + "/matches", default_etag).etag
@@ -224,15 +247,12 @@ def process_year(
         )
 
     for event_obj in event_objs_dict.values():
-        if partial:
-            start = (
-                datetime.strptime(event_obj.start_date, "%Y-%m-%d") - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            end = (
-                datetime.strptime(event_obj.end_date, "%Y-%m-%d") + timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            if not (start <= today <= end) and event_obj.status != EventStatus.ONGOING:
-                continue
+        event_active = (
+            in_event_window(event_obj.start_date, event_obj.end_date, today)
+            or event_obj.status == EventStatus.ONGOING
+        )
+        if partial and not event_active:
+            continue
 
         event_key, event_time = event_obj.key, event_obj.time
 
