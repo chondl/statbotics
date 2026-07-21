@@ -26,9 +26,12 @@ This fork keeps two lines of work:
   support, the freshness ping, and **all** operational documentation (`docs/`,
   deploy process, mirror ops, how EPA/data refresh).
 
-**For anything touching production or the mirror — deploying, rebuilding data, or
-diagnosing live behavior — switch to `cph-staging` and follow its docs there. Do
-not deploy from `cph-master`.**
+**All work happens on `cph-staging` by default — it is the primary checkout at
+the repository root** (`cph-master` lives in the `.worktrees/cph-master`
+worktree). Touch `cph-master` only to prepare a minimal PR back to the upstream
+maintainer. For everything else — features, fixes, deploys, data rebuilds,
+diagnosing live behavior — work on the `cph-staging` checkout and follow its
+docs. Do not deploy from `cph-master`.
 
 ## Working Style
 
