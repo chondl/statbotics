@@ -59,3 +59,39 @@ def test_malformed_key_rejected(monkeypatch):
     resp = client.get(f"/v3/site/ping/event/{CURR_YEAR}IRI!")
     assert resp.status_code == 204
     assert calls == []
+
+
+# ---------------- /v3/site/update_curr_year db-less probe branch --------------
+
+
+def test_site_update_dbless_snapshot_miss_skips_probe(monkeypatch):
+    # Db-less, an unreadable snapshot must degrade to "assume no new data":
+    # skip without probing TBA (an empty etag baseline would always report
+    # new data) and without triggering a partial cycle (which the pipeline's
+    # snapshot-miss guard would skip anyway).
+    monkeypatch.setattr(dr, "DISABLE_DB", True)
+    monkeypatch.setattr(dr, "read_snapshot", lambda year: None)
+    monkeypatch.setattr(
+        dr,
+        "check_year_partial_tba",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("must not probe TBA with an empty etag baseline")
+        ),
+    )
+    client, calls = make_client(monkeypatch)
+    resp = client.get("/v3/site/update_curr_year")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "skipped"}
+    assert calls == []
+
+
+def test_site_update_dbless_snapshot_hit_probes_and_backgrounds(monkeypatch):
+    monkeypatch.setattr(dr, "DISABLE_DB", True)
+    snap_objs = ("year", {}, {}, {}, {}, {})
+    monkeypatch.setattr(dr, "read_snapshot", lambda year: (snap_objs, []))
+    monkeypatch.setattr(dr, "check_year_partial_tba", lambda y, e, t: True)
+    client, calls = make_client(monkeypatch)
+    resp = client.get("/v3/site/update_curr_year")
+    assert resp.json() == {"status": "backgrounded"}
+    assert len(calls) == 1
+    assert calls[0].endswith("/v3/data/update_curr_year")

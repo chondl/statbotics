@@ -83,8 +83,15 @@ def update_curr_year_background():
 async def update_curr_year_site_endpoint(background_tasks: BackgroundTasks):
     if DISABLE_DB:
         loaded = read_snapshot(CURR_YEAR)
-        event_objs = list(loaded[0][2].values()) if loaded else []
-        etags = list(loaded[0][5].values()) if loaded else []
+        if loaded is None:
+            # Snapshot unreadable (read_snapshot never raises): assume no new
+            # data and skip. Probing TBA with an empty etag baseline would
+            # always report "new data" and trigger a partial cycle that the
+            # pipeline's snapshot-miss guard (_update_curr_year) would skip
+            # anyway — so don't spend the TBA calls or the cycle.
+            return {"status": "skipped"}
+        event_objs = list(loaded[0][2].values())
+        etags = list(loaded[0][5].values())
     else:
         event_objs = get_events_db(year=CURR_YEAR)
         etags = get_etags_db(CURR_YEAR)

@@ -44,6 +44,12 @@ db_less_seed_incomplete = False
 # via /info so it is not silent.
 db_less_publish_skipped = False
 
+# Set true when a db-less partial cycle found no readable snapshot (e.g. a
+# transient GCS failure) and was skipped entirely — see the guard in
+# _update_curr_year. Cleared by the next partial cycle that reads the
+# snapshot successfully. Surfaced via /info so it is not silent.
+db_less_partial_skipped = False
+
 
 @contextmanager
 def _tba_force_refresh(refresh_tba: bool) -> Iterator[None]:
@@ -316,8 +322,28 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             snapshot_loaded = True
             timer.print("Read Snapshot")
 
+    global db_less_partial_skipped
     if objs is None or teams is None:
         if DISABLE_DB:
+            if partial:
+                # INVARIANT (db-less): a partial cycle may only run from the
+                # snapshot. There is no other source of prior pipeline state
+                # — the fallback objs below are EMPTY (create_objs), and the
+                # TBA tier logic skips out-of-window completed events whose
+                # manifest validation is fresh, so a partial cycle seeded
+                # from empty objs would publish near-empty artifacts over
+                # the good snapshot/blobs/current-year Parquet. Skip the
+                # cycle entirely: process nothing, publish nothing. The next
+                # successful snapshot read (or an operator full reset)
+                # resumes normal operation.
+                db_less_partial_skipped = True
+                print(
+                    "ERROR: db-less partial cycle SKIPPED — snapshot "
+                    "unreadable, and running from empty objs would publish "
+                    "near-empty artifacts over good ones. Surfaced via /info "
+                    "DB_LESS_PARTIAL_SKIPPED."
+                )
+                return
             teams = load_teams_tba(cache=True)
             objs = create_objs(year)
             timer.print("Load Teams (TBA)")
@@ -330,6 +356,9 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             else:
                 objs = create_objs(year)
                 timer.print("Create Objs")
+    elif DISABLE_DB and partial:
+        # Snapshot readable again: normal partial operation resumes.
+        db_less_partial_skipped = False
 
     # On the snapshot-fallback path (partial but snapshot_loaded False), the
     # team-row baseline is invalid — see process_year for the reasoning.
@@ -521,16 +550,24 @@ def refresh_teams() -> Dict[str, int]:
         # them from TBA — matching the scope of what team pages render from
         # team rows.
         if teams_to_update and not DISABLE_GCS:
-            # Snapshot first (mirroring the process_year write order): the
-            # refreshed rows were mutated in place on the snapshot's teams
-            # list (when a snapshot exists), so rewriting it keeps the next
-            # partial cycle's team-blob gate baseline in step with the blobs
-            # published below.
+            # INVARIANT: blobs first, snapshot last. The snapshot is the
+            # team-blob change-gate baseline the next partial cycle diffs
+            # against, so it may only record state whose blobs are already
+            # published. If the blob publish throws, the snapshot stays
+            # behind — recoverable: the next refresh_teams (or partial
+            # cycle, whose baseline still predates the change) re-detects
+            # the diff and republishes. Snapshot-first would leave the
+            # baseline AHEAD of unpublished blobs on failure, and the gate
+            # would report "unchanged" forever (stale team blobs until a
+            # manual full cycle).
+            publish_team_artifacts(db_teams, set(teams_to_update), all_team_years_list)
+
+            # The refreshed rows were mutated in place on the snapshot's
+            # teams list (when a snapshot exists), so rewriting it brings the
+            # gate baseline in step with the blobs just published.
             if snapshot_state is not None:
                 write_snapshot(CURR_YEAR, snapshot_state[0], db_teams)
                 timer.print("Write Snapshot")
-
-            publish_team_artifacts(db_teams, set(teams_to_update), all_team_years_list)
         timer.print(f"Publish Teams ({len(teams_to_update)} rows)")
         return {"teams_updated": len(teams_to_update)}
 
