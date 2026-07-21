@@ -128,6 +128,25 @@ Write DB is small on partial cycles today because the lossy `changed()` gate
 drops most rows — Track 1 item C removes that gate, so expect Write DB to grow;
 measure it here.
 
+### Measured PRODUCTION timings (Cloud Run, 2026-07-21, post-perf-program)
+
+All from real runs after the four perf features + the db-less flip (16:07 UTC).
+Before-numbers are measured production cycles from 2026-07-20/21 pre-change.
+
+| Cycle | Before | After | Dominant steps after |
+|-------|--------|-------|----------------------|
+| Probe, no new data (cron/ping) | seconds, no pipeline | unchanged | a few conditional GETs |
+| Fresh-data partial cycle | ~2m10s | **~70 s** | TBA ~29 s (in-window etag checks + daily tier), EPA ~19 s |
+| Full current-year reset (`reset_curr_year`) | ~6m32s (Jul 17) | **~2m07s cold container / archive-warm TBA ~19-42 s** | TBA revalidation, EPA ~18 s, Write Storage ~40 s |
+| Historical-year job (`reprocess-year`) | ~17 min (DB mode) | ~5m09s for the year itself (cold TBA 3m00) + chained curr-year render | TBA cold fetch; DB writes now skipped (job defaults `DISABLE_DB=True`) |
+| Step: Read Snapshot | ~5.8 s | ~3.3-5.3 s (pickle+zstd) | |
+| Step: Write Snapshot | ~33.5 s | ~4-7 s (pickle+zstd) | |
+| Step: Write Storage (partial) | ~36-38 s | ~10-13 s (team-blob gate + orjson) | |
+| Step: Write DB | ~10 s partial / 1m05-6m32 full | **0 (db-less)** | |
+
+The local table above is retained for dev-machine reference only — production
+sizing uses THESE numbers.
+
 ---
 
 ## Smoke suite (part of the READY bar)
