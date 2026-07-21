@@ -4,7 +4,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import duckdb
 
@@ -359,6 +359,22 @@ def get_team_events(
         limit,
         offset,
     )
+
+
+def get_team_event_teams() -> Set[int]:
+    """Distinct team numbers with at least one TeamEvent across all years —
+    the db-less twin of the DB read used by remove_teams_with_no_events (DB
+    retirement Phase 1: feeds the publish-time no-event prune)."""
+    base = _sync()
+    sql = f'SELECT DISTINCT "team" FROM {_source(base, "team_events")}'
+    cursor = _connection().cursor()
+    try:
+        cursor.execute(sql)
+    except duckdb.IOException as e:
+        if "No files found" in str(e):
+            return set()
+        raise
+    return {row[0] for row in cursor.fetchall()}
 
 
 def get_match(match: str) -> Optional[Model]:
