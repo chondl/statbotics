@@ -5,6 +5,7 @@ import requests
 from fastapi import APIRouter, BackgroundTasks, Response
 
 from src.constants import BACKEND_URL, CURR_YEAR, DISABLE_DB
+from src.data import main as data_main
 from src.data.main import refresh_teams, reset_all_years, update_curr_year
 from src.data.sweep import revalidate_tba
 from src.data.tba import check_year_partial as check_year_partial_tba
@@ -88,8 +89,12 @@ async def update_curr_year_site_endpoint(background_tasks: BackgroundTasks):
             # data and skip. Probing TBA with an empty etag baseline would
             # always report "new data" and trigger a partial cycle that the
             # pipeline's snapshot-miss guard (_update_curr_year) would skip
-            # anyway — so don't spend the TBA calls or the cycle.
-            return {"status": "skipped"}
+            # anyway — so don't spend the TBA calls or the cycle. Surface the
+            # degraded state: a persistent snapshot failure (e.g. fingerprint
+            # mismatch after a model change) would otherwise starve updates
+            # silently behind an ordinary-looking "skipped".
+            data_main.db_less_partial_skipped = True
+            return {"status": "skipped", "reason": "snapshot-unreadable"}
         event_objs = list(loaded[0][2].values())
         etags = list(loaded[0][5].values())
     else:

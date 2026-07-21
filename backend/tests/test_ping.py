@@ -78,10 +78,14 @@ def test_site_update_dbless_snapshot_miss_skips_probe(monkeypatch):
             AssertionError("must not probe TBA with an empty etag baseline")
         ),
     )
+    monkeypatch.setattr(dr.data_main, "db_less_partial_skipped", False)
     client, calls = make_client(monkeypatch)
     resp = client.get("/v3/site/update_curr_year")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "skipped"}
+    assert resp.json() == {"status": "skipped", "reason": "snapshot-unreadable"}
+    # A persistent snapshot failure must be visible at /info, not hidden
+    # behind an ordinary-looking skip.
+    assert dr.data_main.db_less_partial_skipped is True
     assert calls == []
 
 
