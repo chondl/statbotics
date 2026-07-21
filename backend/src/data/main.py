@@ -60,6 +60,11 @@ def process_year(
     timer = Timer()
     curr_year_gcs = year_num == CURR_YEAR and not DISABLE_GCS
     orig_objs = deepcopy(objs)
+    # Team-blob change-gate baseline: captured at cycle start, before anything
+    # (process_year_tba today, or a future post-post_process teams publish)
+    # mutates the teams list, so write_objs compares against true cycle-start
+    # team rows. Partial cycles only, mirroring orig_objs below.
+    orig_teams = deepcopy(teams) if partial else None
     if all_team_years is None:
         all_team_years = defaultdict(dict)
         try:
@@ -97,7 +102,9 @@ def process_year(
         timer.print(str(year_num) + " Write Snapshot")
 
         parquet_uploads = build_parquet_uploads(year_num, objs, teams)
-        write_objs_storage(objs, orig_objs if partial else None, teams, parquet_uploads)
+        write_objs_storage(
+            objs, orig_objs if partial else None, teams, parquet_uploads, orig_teams
+        )
         timer.print(str(year_num) + " Write Storage")
 
         if not DISABLE_DB:
