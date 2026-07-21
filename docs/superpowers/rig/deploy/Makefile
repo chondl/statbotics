@@ -40,14 +40,13 @@ API_CPU      ?= 2
 UPDATE_SCHED ?= statbotics-update
 GC_SCHED     ?= statbotics-gc
 
-# Build/deploy the DEPLOY BRANCH checkout, not the main worktree. docs/ (where
-# this Makefile lives) is git-excluded and only exists in the main checkout on
-# `master`, but the code + Dockerfiles that get deployed live on the `staging`
-# branch — its worktree at <main>/.worktrees/staging. MAIN_DIR is 4 up from
-# here; DEPLOY_DIR is the staging worktree. Override DEPLOY_DIR to deploy a
-# different checkout.
+# Build/deploy the DEPLOY BRANCH checkout, not the main worktree. The code +
+# Dockerfiles that get deployed live on the `cph-staging` branch (the deployed
+# fork line) — its worktree at <main>/.worktrees/cph-staging. MAIN_DIR is 4 up
+# from here; DEPLOY_DIR is the cph-staging worktree. Override DEPLOY_DIR to
+# deploy a different checkout.
 MAIN_DIR     ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../../..)
-DEPLOY_DIR   ?= $(MAIN_DIR)/.worktrees/staging
+DEPLOY_DIR   ?= $(MAIN_DIR)/.worktrees/cph-staging
 BACKEND_DIR  ?= $(DEPLOY_DIR)/backend
 FRONTEND_DIR ?= $(DEPLOY_DIR)/frontend
 SMOKE        ?= $(MAIN_DIR)/docs/superpowers/rig/smoke/smoke.py
