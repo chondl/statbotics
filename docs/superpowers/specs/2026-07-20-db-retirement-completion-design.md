@@ -74,10 +74,16 @@ Make the pipeline the owner of Team state, GCS the store:
 3. **Db-less pruning.** Replace `remove_teams_with_no_events` with a filter
    at publish time: exclude teams with no TeamEvents across years (DuckDB
    over the team_events Parquet).
-4. **Db-less `refresh_teams`.** Rewrite against pipeline state: fetch TBA
-   teams (`cache=False`), load current teams + all-history TeamYears from
-   Parquet, compute the same staleness diff, republish the teams table,
-   `teams/all`, affected `team/{num}` blobs, and the snapshot's teams.
+4. **Db-less `refresh_teams`, automatically scheduled.** Rewrite against
+   pipeline state: fetch TBA teams (`cache=False`), load current teams +
+   all-history TeamYears from Parquet, compute the same staleness diff,
+   republish the teams table, `teams/all`, affected `team/{num}` blobs, and
+   the snapshot's teams. **Add a daily Cloud Scheduler job for it** — the
+   operating principle (user decision 2026-07-21) is that no operator action
+   is ever required to keep the system current with new teams, events, or
+   schedules appearing on TBA. New events/schedules already flow in via the
+   hourly `events/{year}` ETag check; scheduled refresh closes the team-fields
+   loop (names, rookie years, placeholder fixes).
 5. Delete the `Write DB` branches only in Phase 4 — until the flip, DB mode
    keeps working unchanged, which makes Phase 1 independently shippable and
    testable by diffing published blobs before/after (they must be
@@ -114,7 +120,8 @@ Make the pipeline the owner of Team state, GCS the store:
    DuckDB-over-Parquet equivalent (same aggregates over
    `parquet/{year}/matches.parquet`).
 
-### Phase 4 — decommission and delete (after ≥2 weeks of db-less soak)
+### Phase 4 — decommission and delete (after 48 h of db-less soak; user
+decision 2026-07-21)
 
 1. Final safety export: `pg_dump` to `gs://…/final-db-export/` before any
    deletion.
@@ -154,15 +161,13 @@ ETag element, which simplifies what the snapshot carries db-less.
   tolerance-diff).
 - Every deploy follows DEPLOY.md §2's checklist as usual.
 
-## 5. Open questions
+## 5. Resolved questions
 
-- Soak length before instance deletion (spec default: 2 weeks; the flag flip
-  is instantly reversible during soak, so this is cheap insurance).
-- `remove_teams_with_no_events` semantics: the DB version deletes rows;
-  db-less we filter at publish. Is a team that exists in TBA but has never
-  played meant to be invisible everywhere, or only on the teams page?
-  (Spec default: filter from `teams/all` and the teams Parquet, matching
-  today's observable behavior.)
-- Does anything schedule `/v3/data/refresh_teams` today? (No scheduler
-  found; it appears operator-only + inside `reset_curr_year`. Spec assumes
-  operator-only.)
+- ~~Soak length~~ **Decided 2026-07-21: 48 hours** from the production flag
+  flip; the flip is instantly reversible during soak.
+- ~~refresh_teams scheduling~~ **Decided 2026-07-21: automatic** — daily
+  scheduled job (Phase 1 item 4). Nothing in normal operation may depend on
+  an operator running anything.
+- `remove_teams_with_no_events` semantics: db-less we filter at publish,
+  from `teams/all` and the teams Parquet — matching today's observable
+  behavior. (Spec default, unchallenged.)

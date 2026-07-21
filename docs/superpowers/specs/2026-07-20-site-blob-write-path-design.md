@@ -135,9 +135,11 @@ Edge cases:
   reprocess-year YEAR=<past>` is self-healing — the next hourly cycle
   re-renders every team blob and the content-hash diff picks up changed
   history. With the gate, historical changes no longer propagate on partial
-  cycles. **Operational rule: a historical `reprocess-year` must be followed
-  by `make reprocess-curr-year`** (non-partial → `orig_objs is None` → renders
-  all). Preferably chain it in the Makefile target (open question §10).
+  cycles. **Resolution (user decision 2026-07-21): deterministic code, not a
+  runbook rule** — the historical-reprocess path itself triggers a full
+  current-year render (`reset_curr_year`) when it completes, so no operator
+  or agent has to remember anything. Chain it in the reprocess driver/Make
+  target as code.
 
 Expected quiet-cycle render count: 11 singletons + 0 events + 0 teams ≈ 11
 `compress()` calls, down from ~3,735.
@@ -238,17 +240,19 @@ Either PR can land first; PR 1 is smaller and de-risks the parity harness.
   notes so it isn't mistaken for a gating bug.
 - **Browser check:** load a team page and an event page on the mirror.
 
-## 10. Open questions
+## 10. Open and resolved questions
 
-- Should `make reprocess-year` chain `reprocess-curr-year` automatically
-  (safer, slower) or just document the rule in DEPLOY.md/DATA-REFRESH.md?
+- ~~Chain or document?~~ **Decided 2026-07-21: chain in code** (§4). Prefer
+  deterministic code over runbook procedures generally.
 - When the [DB retirement](2026-07-20-db-retirement-completion-design.md)
   Phase 1 moves teams publishes after `post_process`, does the team-blob
   render move with it? If so, the `orig_teams` baseline must be captured
   before `post_process` mutates the list — coordinate the two PRs.
 - `teams/all` stays ungated (it is one small blob); worth gating only if
   profiling says otherwise.
-- Is `get_team_years_db` (full-history fetch, storage.py:209) worth skipping
-  entirely on cycles where the gate says no team blob renders? It is a
-  sizable DB read per cycle; the gate decision needs only `objs[1]`/
-  `orig_objs[1]` and `orig_teams`, so the fetch can be made lazy.
+- The full-history team_years fetch feeding team blobs (storage.py:209) is a
+  DB read today and becomes a Parquet/DuckDB read after
+  [DB retirement](2026-07-20-db-retirement-completion-design.md) — the "big
+  DB read" framing is transitional. Making it lazy (skip when the gate
+  renders zero team blobs) is a cheap add in PR 2 and stays worthwhile
+  post-retirement; implement if trivial, don't contort for it.

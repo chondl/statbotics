@@ -79,13 +79,13 @@ the only URL families fetched anywhere.)
   manifest entry with `last_validated` older than 24 h gets a conditional GET
   that cycle. With ~60–120 completed events by season's end this is at most a
   few hundred 304s per day, spread across 24 cycles.
-- The **monthly sweep** is a scheduled job (Cloud Scheduler, monthly, hitting
-  a new `/v3/data/revalidate_tba` endpoint): revalidate every path in every
-  year archive; collect the set of years whose data actually changed (any
-  200); reprocess only those years (`process_year` full, Parquet republish).
-  ~26k conditional GETs, almost all 304s — a few minutes once the fetch layer
-  is parallelized, and it can be spread across days (one or two years per
-  day) if we want to be gentler on TBA.
+- The **historical sweep** runs as a daily scheduled job (Cloud Scheduler →
+  `/v3/data/revalidate_tba`) that revalidates exactly **one historical year
+  per day**, round-robin, with **serial** requests (no parallelism) — TBA
+  etiquette per user decision 2026-07-21. ~1,000 conditional GETs per day,
+  almost all 304s; every year gets revisited roughly monthly. If any path in
+  the swept year returns a 200 (data actually changed), that year is
+  reprocessed (`process_year` full, Parquet republish).
 - **Manual force:** `make reprocess-year YEAR=… REFRESH_TBA=1` (and a query
   param on the endpoint) bypasses the manifest for that year — every path is
   fetched unconditionally and the archive rebuilt. For known corrections.
@@ -152,7 +152,8 @@ plus the parity check in §7:
    dual-write ETags (manifest + objs[5]).
 3. Tier policy: grace extension, daily revalidation in the hourly cycle,
    `REFRESH_TBA` force flag.
-4. Monthly sweep endpoint + Cloud Scheduler job + changed-year reprocess.
+4. Daily one-year sweep endpoint + Cloud Scheduler job + changed-year
+   reprocess (serial requests).
 5. Retire `objs[5]`/ETag ORM reads (after DB retirement lands or with it).
 
 ## 7. Verification
@@ -167,11 +168,11 @@ plus the parity check in §7:
   conditional-GET count, archive upload — and record numbers in
   [RIG.md](../rig/RIG.md).
 
-## 8. Open questions
+## 8. Resolved questions
 
-- Sweep pacing: one monthly burst (~26k requests in minutes) vs spread
-  (~2 years/day). Default in this spec: burst, parallelism capped at 8;
-  revisit if TBA rate-limits.
-- Should the current-year archive also be the source for `reset_curr_year`
-  (trust + tiers) — yes per user policy — including the very first
-  post-deploy run, which starts cold and self-heals? (Assumed yes.)
+- ~~Sweep pacing~~ **Decided 2026-07-21: serialized, one historical year per
+  day** (see §2.3). No parallel sweep bursts. Net TBA load goes *down*
+  overall: full rebuilds stop refetching everything, and the sweep's daily
+  serial trickle is far below today's rebuild traffic.
+- Current-year archive is the source for `reset_curr_year` (trust + tiers),
+  including the cold first post-deploy run, which self-heals. (Confirmed.)
