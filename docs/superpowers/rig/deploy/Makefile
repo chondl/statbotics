@@ -40,13 +40,15 @@ API_CPU      ?= 2
 UPDATE_SCHED ?= statbotics-update
 GC_SCHED     ?= statbotics-gc
 
-# Build/deploy the DEPLOY BRANCH checkout, not the main worktree. The code +
-# Dockerfiles that get deployed live on the `cph-staging` branch (the deployed
-# fork line) — its worktree at <main>/.worktrees/cph-staging. MAIN_DIR is 4 up
-# from here; DEPLOY_DIR is the cph-staging worktree. Override DEPLOY_DIR to
-# deploy a different checkout.
+# Build/deploy from the repository root checkout, which since 2026-07-20 IS the
+# `cph-staging` branch (the deployed fork line) — the former dedicated worktree
+# at .worktrees/cph-staging was retired when cph-staging became the primary
+# checkout. MAIN_DIR is 4 up from here. The check-deploy-src guard (below)
+# refuses to build if the checkout is on another branch or has uncommitted
+# backend/frontend changes. DEPLOY_DIR may be overridden to another checkout,
+# but the guard still requires it to be a clean cph-staging checkout.
 MAIN_DIR     ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../../..)
-DEPLOY_DIR   ?= $(MAIN_DIR)/.worktrees/cph-staging
+DEPLOY_DIR   ?= $(MAIN_DIR)
 BACKEND_DIR  ?= $(DEPLOY_DIR)/backend
 FRONTEND_DIR ?= $(DEPLOY_DIR)/frontend
 SMOKE        ?= $(MAIN_DIR)/docs/superpowers/rig/smoke/smoke.py
@@ -61,13 +63,32 @@ API_URL      := https://$(API_DOMAIN)
 .DEFAULT_GOAL := help
 
 # --------------------------------- BUILD -------------------------------------
+# Deploys must build exactly what the cph-staging branch records: refuse to
+# build from another branch or with uncommitted backend/frontend changes, so
+# production can never silently drift from the branch history (every change
+# ships via a PR to cph-staging first).
+.PHONY: check-deploy-src
+check-deploy-src:
+	@branch=$$(git -C $(DEPLOY_DIR) branch --show-current); \
+	if [ "$$branch" != "cph-staging" ]; then \
+	  echo "ERROR: DEPLOY_DIR ($(DEPLOY_DIR)) is on branch '$$branch', not cph-staging."; \
+	  echo "Deploys build only from a clean cph-staging checkout (production == branch history, always)."; \
+	  exit 1; \
+	fi; \
+	dirty=$$(git -C $(DEPLOY_DIR) status --porcelain -- backend frontend); \
+	if [ -n "$$dirty" ]; then \
+	  echo "ERROR: uncommitted backend/ or frontend/ changes in $(DEPLOY_DIR) — land them via a PR to cph-staging before shipping:"; \
+	  echo "$$dirty"; \
+	  exit 1; \
+	fi
+
 .PHONY: build build-api build-web
 build: build-api build-web ## Build both container images (Cloud Build -> Artifact Registry)
 
-build-api: ## Build the backend image
+build-api: check-deploy-src ## Build the backend image
 	cd $(BACKEND_DIR) && $(GC) builds submit --tag $(IMAGE_API) --timeout=1200 .
 
-build-web: ## Build the frontend image (BACKEND_URL/BUCKET_URL are inlined at build time)
+build-web: check-deploy-src ## Build the frontend image (BACKEND_URL/BUCKET_URL are inlined at build time)
 	cfg=$$(mktemp).yaml; \
 	printf 'steps:\n  - name: gcr.io/cloud-builders/docker\n    args: [build, --build-arg=BACKEND_URL=https://$(API_DOMAIN)/v3/site, --build-arg=BUCKET_URL=https://$(BLOB_DOMAIN), --build-arg=PROD=True, -t, $(IMAGE_WEB), .]\nimages: [$(IMAGE_WEB)]\noptions: {machineType: E2_HIGHCPU_8}\n' > $$cfg; \
 	cd $(FRONTEND_DIR) && $(GC) builds submit --config=$$cfg --timeout=1800 .; \
