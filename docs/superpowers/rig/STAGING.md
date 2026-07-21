@@ -39,7 +39,8 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
   `statbotics`.
 - Bucket: `statbotics-staging-site` (public read).
 - Cloud Run: `statbotics-api` (2 vCPU / 8Gi), `statbotics-web`; jobs
-  `statbotics-seed`, `statbotics-parquet-backfill` (one-off DB→Parquet backfill).
+  `statbotics-seed` (legacy DB seed), transient `statbotics-reprocess-{year}`
+  jobs from `make reprocess-year`.
 - Scheduler: `statbotics-update` (hourly), `statbotics-gc` (daily 04:30 UTC, v2/ GC).
   How the hourly cron + read-triggered ping drive EPA recompute:
   [DATA-REFRESH.md](DATA-REFRESH.md).
@@ -52,7 +53,9 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
 - Snapshot + Parquet publishing are **on by default in the code** (no flag). Each
   cycle writes `state/snapshot.{year}` and folds current-year Parquet into the
   single manifest write.
-- `DISABLE_DB` — **demonstrated toggle, NOT the deployed default.** `DISABLE_DB=True`
+- `DISABLE_DB` — **the deployed production mode since 2026-07-21** (`make
+  flip-dbless`; rollback `make flip-db`; Cloud SQL retained during the 48 h
+  soak, deleted in Phase 4). `DISABLE_DB=True`
   makes the backend construct no engine/session, skip all DB writes, and serve
   `/v3`+`/v3/site` purely from Parquet + the snapshot. To flip staging to a db-less
   demo: `gcloud --project=statbotics-staging run services update statbotics-api
@@ -62,21 +65,16 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
   `--remove-env-vars=DISABLE_DB`. Staging is deliberately deployed **DB-on** so the
   DB remains the queryable fallback.
 
-## Historical Parquet backfill (one-off)
+## Historical Parquet + hist blobs (pipeline-owned)
 
-DuckDB serves `/v3` for a year from `parquet/{year}/*.parquet`. The historical DB
-build ran GCS-disabled, so those were backfilled once via the Cloud Run job
-`statbotics-parquet-backfill` running `backfill_parquet.py` (reads DB rows per
-year → reviewed Parquet writer; no EPA recompute, no DB writes; **single terminal
-manifest write** — a per-year manifest R-M-W races the manifest's 60 s
-Cache-Control). Re-run / verify:
-```bash
-gcloud --project=statbotics-staging run jobs update statbotics-parquet-backfill \
-  --region=us-central1 --args="backfill_parquet.py"            # backfill all years
-gcloud --project=statbotics-staging run jobs update statbotics-parquet-backfill \
-  --region=us-central1 --args="backfill_parquet.py,--verify"   # row-count vs DB
-gcloud --project=statbotics-staging run jobs execute statbotics-parquet-backfill --region=us-central1
-```
+DuckDB serves `/v3` for a year from `parquet/{year}/*.parquet`; historical
+pages read `hist/{epoch}/…` blobs. Since DB retirement Phase 3 the pipeline
+emits both for every historical year it processes (`write_parquet` +
+`write_hist_blobs` in `process_year`) — the one-off DB-reading scripts
+(`backfill_parquet.py`, `backfill_blobs.py`) and their jobs are retired.
+Rebuild one year with `make reprocess-year YEAR=…`; full history via a
+db-less `reset_all_years` — see
+[historical-backfill.md](../deliverables/historical-backfill.md).
 - Cloudflare Worker: `statbotics-proxy` (+ 2 routes, 2 proxied AAAA records).
 
 ## Secrets
@@ -140,8 +138,8 @@ the cycle takes ~62-76s but completes and the manifest advances).
   carries `Cache-Control: public, max-age=60`. Anything that does many rapid
   read-manifest → add-ref → write-manifest cycles (e.g. a naive per-year Parquet
   backfill) reads stale copies and clobbers its own additions. Do a **single
-  terminal manifest write** (the pipeline already writes it once per cycle, so it
-  never hits this). See `backfill_parquet.py`.
+  terminal manifest write** (the pipeline already writes it once per cycle, and
+  its per-year historical cadence is minutes, so it never hits this).
 - **Cloudflare Host rewrite is required** — a plain proxied CNAME to run.app 404s
   (Cloud Run routes by Host). The `statbotics-proxy` Worker rewrites Host to the
   run.app origin. run.app hostnames are stable across revisions.

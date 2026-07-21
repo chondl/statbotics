@@ -32,9 +32,12 @@ Every trigger runs the same function: `process_year()` in
 4. `process_year_epa` — the model: `calc.py` **sorts every current-year match by
    time and replays each one** through the EPA model; `agg.py` rolls match EPA up
    to event and year; `metrics.py` computes normalized EPA.
-5. `write_objs_db` — write to Postgres.
-6. If `year == CURR_YEAR` — publish compressed blobs to GCS and fold current-year
-   Parquet into a single `manifest.json` write.
+5. If `year == CURR_YEAR` — publish compressed blobs to GCS and fold current-year
+   Parquet into a single `manifest.json` write; historical years publish their
+   Parquet + `hist/` site blobs instead. GCS is the store.
+6. `write_objs_db` — DB mode only (`DISABLE_DB=False`): additionally write
+   Postgres. Skipped entirely after the db-less flip; Cloud SQL then sits in
+   soak as the rollback path until Phase 4 decommissions it.
 
 **EPA is a full-season replay every cycle — O(season), not incremental.** The
 `partial` and `tba_partial` flags change only the *DB read strategy* and the
@@ -69,7 +72,8 @@ Both automatic triggers call the **same probe**,
                                                                 ▼
                               GET /v3/data/update_curr_year
                               = update_curr_year(partial=True, tba_partial=True)
-                              = full-season EPA replay + DB write + GCS/Parquet publish
+                              = full-season EPA replay + GCS/Parquet publish
+                                (+ DB write only while DISABLE_DB=False)
 ```
 
 ### (A) Hourly scheduler — the idle backstop
@@ -133,7 +137,7 @@ automatic:
 | Command | Endpoint | Effect |
 |---|---|---|
 | `make reprocess-curr-year` | `/v3/data/reset_curr_year` | Full current-year recompute, fresh TBA fetch, **no etag gate**. Picks up events already on TBA. ~4–6 min. |
-| `make reprocess-year YEAR=` | Cloud Run job | One historical year: `clear_year` + `process_year(partial=False)` + Parquet + hist blobs. |
+| `make reprocess-year YEAR=` | Cloud Run job | One historical year via `reprocess_year()`: `process_year(partial=False)` + Parquet + hist blobs + chained current-year re-render. Db-less capable (`DISABLE_DB=True`). |
 | `make update-curr-year` | `/v3/site/update_curr_year` | Same cheap gated path as the hourly cron (manual poke). |
 | full history | `reset_all_years` | Rebuild 2002→present. See [historical-backfill.md](../deliverables/historical-backfill.md). |
 

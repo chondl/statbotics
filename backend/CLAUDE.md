@@ -80,6 +80,14 @@ When adding a new season, add a new entry to `all_keys` and a new `clean_breakdo
 
 ## Database (`src/db/`)
 
+> **DB retirement (this branch):** production serves and persists via
+> DuckDB-over-Parquet + GCS; with `DISABLE_DB=True` (the Phase 2 flip) the
+> engine is never constructed and `src/db/read`/`src/db/write` are dormant —
+> Cloud SQL stays bound only as the rollback path during the 48 h soak, then
+> is decommissioned (Phase 4). **`src/db/models/` stays load-bearing db-less**:
+> the Parquet, snapshot, and DuckDB schemas all introspect the attrs/ORM
+> classes. The description below is the legacy `cph-master` architecture.
+
 CockroachDB via SQLAlchemy 2.0. Seven tables defined in `src/db/models/`:
 `Team`, `Year`, `TeamYear`, `Event`, `TeamEvent`, `Match`, `TeamMatch`.
 
