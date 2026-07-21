@@ -8,6 +8,7 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 
 import { getEvent } from "../../api/event";
+import { BACKEND_URL, CURR_YEAR } from "../../constants";
 import SiteLayout from "../../layouts/siteLayout";
 import Tabs from "../../pagesContent/event/[event_id]/tabs";
 import NotFound from "../../pagesContent/shared/notFound";
@@ -40,6 +41,20 @@ const InnerPage = () => {
       document.title = `${event_id} - Statbotics`;
     }
   }, [event_id]);
+
+  useEffect(() => {
+    // Fire-and-forget freshness ping for live current-year events. The
+    // backend absorbs bursts with an in-memory cooldown, so this is safe to
+    // call on every page view.
+    if (!event_id || !data?.event || data.event.year !== CURR_YEAR) return;
+    const today = new Date();
+    const start = new Date(`${data.event.start_date}T00:00:00`);
+    const end = new Date(`${data.event.end_date}T23:59:59`);
+    start.setDate(start.getDate() - 1);
+    end.setDate(end.getDate() + 1);
+    if (today < start || today > end) return;
+    fetch(`${BACKEND_URL}/ping/event/${event_id}`).catch(() => {});
+  }, [event_id, data]);
 
   if (!data) {
     return <NotFound type="Event" />;

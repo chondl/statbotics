@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional, Tuple
 from src.db.models import Event, Match, TeamEvent, TeamYear, Year
 from src.models.types import AlliancePred, Attribution, MatchPred
 from src.tba.constants import PLACEHOLDER_TEAMS
-from src.types.enums import MatchStatus
+from src.types.enums import EventType, MatchStatus
 
 
 class Model:
@@ -74,7 +74,8 @@ class Model:
 
         attributions = self.attribute_match(match, red_pred, blue_pred)
 
-        # Don't update if 1) placeholder match, 2) elim dq, 3) all fouls
+        # Don't update if 1) offseason, 2) placeholder match, 3) elim dq, 4) all fouls
+        offseason_event = event.type == EventType.OFFSEASON
         teams = set(match.get_red() + match.get_blue())
         placeholder_match = len(set(PLACEHOLDER_TEAMS).intersection(teams)) > 0
         elim_dq = match.elim and (
@@ -87,7 +88,7 @@ class Model:
             and match.red_no_foul == 0
             and (match.red_foul or 0) > 0
         )
-        skip_update = placeholder_match or elim_dq or all_fouls
+        skip_update = offseason_event or placeholder_match or elim_dq or all_fouls
 
         epas: Dict[str, Any] = {}
         for team, attr in attributions.items():

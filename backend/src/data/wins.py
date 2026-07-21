@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 from src.constants import CURR_YEAR
 from src.data.utils import objs_type
 from src.db.models import Event, Match, Team, TeamEvent, TeamYear
-from src.types.enums import MatchStatus, MatchWinner
+from src.types.enums import EventType, MatchStatus, MatchWinner
 from src.utils.utils import r
 
 
@@ -19,6 +19,7 @@ TRP = Tuple[int, int]
 
 def process_year(objs: objs_type) -> objs_type:
     year_num = objs[0].year
+    event_to_type = {e.key: e.type for e in objs[2].values()}
 
     ty_record: Dict[int, TRecord] = defaultdict(lambda: (0, 0, 0, 0))
     te_record: Dict[Tuple[int, str], TRecord] = defaultdict(lambda: (0, 0, 0, 0))
@@ -31,7 +32,11 @@ def process_year(objs: objs_type) -> objs_type:
         status = m_obj.status
         winner = m_obj.winner
 
-        if status != MatchStatus.COMPLETED or winner is None:
+        if (
+            event_to_type[event] == EventType.OFFSEASON
+            or status != MatchStatus.COMPLETED
+            or winner is None
+        ):
             continue
 
         for alliance in ["red", "blue"]:
