@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 from src.data.utils import objs_type
 from src.db.models import Match, TeamEvent
 from src.models.epa.unitless import epa_to_unitless_epa, get_epa_to_norm_epa_func
+from src.tba.clean_data import is_synthetic_team
 from src.utils.utils import r
 
 
@@ -73,6 +74,14 @@ def process_year(objs: objs_type) -> objs_type:
 
         ty.team_matches = [compact_from_match(m, ty.team) for m in ms]
 
+        # Placeholder demo robots and packed second robots (604B) compete at
+        # offseason events but are not season teams. norm_epa and the rank
+        # fields are population-relative, so including them shifts every real
+        # team's numbers -- and upstream never had them, since its offseason
+        # filters dropped any event containing one.
+        if is_synthetic_team(ty.team):
+            continue
+
         epa_list.append(ty.epa)
         total_epas.append((ty.team, ty.epa))
         country_epas[ty.country or ""].append((ty.team, ty.epa))
@@ -98,6 +107,10 @@ def process_year(objs: objs_type) -> objs_type:
         ty.norm_epa = r(norm_epa)
 
         team = ty.team
+        if is_synthetic_team(team):
+            # Not in any sorted population above: no year-level rank exists.
+            continue
+
         total_epa_rank = sorted_teams.index(team) + 1
         total_team_count = len(total_epas)
         ty.total_epa_percentile = r(1 - total_epa_rank / total_team_count, 4)

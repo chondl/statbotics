@@ -3,6 +3,7 @@ from typing import Optional
 from src.tba.constants import (
     CANADA_MAPPING,
     DISTRICT_MAPPING,
+    PLACEHOLDER_TEAMS,
     USA_MAPPING,
     VALID_DISTRICTS,
 )
@@ -85,3 +86,19 @@ def format_team(team: int) -> str:
     if suffix_index > len(TEAM_SUFFIXES):
         return str(team)
     return f"{team & TEAM_NUMBER_MASK}{TEAM_SUFFIXES[suffix_index - 1]}"
+
+
+_PLACEHOLDER_TEAM_SET = set(PLACEHOLDER_TEAMS)
+
+
+def is_synthetic_team(team: int) -> bool:
+    """True for entities that compete but are not season teams: FIRST's
+    placeholder demo robots (9970-9999) and packed second robots (604B).
+
+    They belong on offseason event pages but must stay OUT of year-level
+    populations. norm_epa is a rank/percentile mapping over the year's teams
+    (get_epa_to_norm_epa_func bisects the sorted epa list) and the rank fields
+    index sorted team lists, so letting 41 of these into the population moved
+    norm_epa for 1604 real teams. Upstream never had them: its offseason
+    filters dropped any event containing one."""
+    return team > TEAM_NUMBER_MASK or team in _PLACEHOLDER_TEAM_SET
