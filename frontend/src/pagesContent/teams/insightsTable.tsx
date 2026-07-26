@@ -11,7 +11,7 @@ import { FilterBar } from "../../components/filterBar";
 import { CURR_YEAR, RP_NAMES } from "../../constants";
 import { APITeamYear } from "../../types/api";
 import { TeamYearsData } from "../../types/data";
-import { round, truncate } from "../../utils";
+import { formatTeamNumber, round, truncate } from "../../utils";
 
 export type TeamYearInsights = {
   num: number;
@@ -102,7 +102,7 @@ const PageTeamInsightsTable = ({
   const columns = useMemo<any>(() => {
     return [
       columnHelper.accessor("num", {
-        cell: (info) => info.getValue(),
+        cell: (info) => formatTeamNumber(info.getValue()),
         header: "Number",
       }),
       columnHelper.accessor("team", {
