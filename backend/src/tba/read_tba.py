@@ -1,16 +1,16 @@
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
+from src.tba import cache as tba_cache
 from src.tba.breakdown import clean_breakdown, post_clean_breakdown
-from src.tba.clean_data import clean_district, clean_state, get_match_time
+from src.tba.clean_data import clean_district, clean_state, get_match_time, parse_team
 from src.tba.constants import (
     DISTRICT_OVERRIDES,
     EVENT_BLACKLIST,
     EVENT_TYPE_OVERRIDES,
     MATCH_BLACKLIST,
-    PLACEHOLDER_TEAMS,
 )
 from src.tba.main import get_tba
 from src.tba.types import EventDict, MatchDict, TeamDict
@@ -87,8 +87,47 @@ def get_event_teams(
     data, new_etag = get_tba(query_str, etag=etag, cache=cache)
     if type(data) is bool:
         return [], new_etag
-    out = [int(x["key"][3:]) for x in data]
+    out = [parse_team(x["key"]) for x in data]
     return out, new_etag
+
+
+OFFSEASON_REVALIDATION_HOURS = 24
+
+
+def _probe_cache(url: str, cache: bool) -> bool:
+    """Freshness tier for the offseason quality-filter probes (TBA cache
+    design §2.3). Partial cycles re-run the filters every cycle so that an
+    event which failed them earlier (empty roster, no schedule yet) can enter
+    once TBA fills in — but that must not mean two network round-trips per
+    type-99 event per cycle. Serve the pickle unless the manifest says this
+    path has gone stale; paths with no manifest state fall through to the
+    plain cache path, which fetches when no pickle exists."""
+    if cache:
+        return True
+    return not tba_cache.needs_revalidation(url, OFFSEASON_REVALIDATION_HOURS)
+
+
+def _week_calendar(data: Any) -> List[Tuple[int, str]]:
+    """(week, earliest start_date) for the year's weeks, ascending. Built from
+    the events TBA does week-stamp, so a week-less event can be placed in the
+    competition window its start date falls in."""
+    firsts: Dict[int, str] = {}
+    for event in data:
+        week, start = event.get("week"), event.get("start_date")
+        if week is None or not start:
+            continue
+        if week not in firsts or start < firsts[week]:
+            firsts[week] = start
+    return sorted(firsts.items(), key=lambda item: item[1])
+
+
+def _derive_week(start_date: str, week_starts: List[Tuple[int, str]]) -> Optional[int]:
+    """The last week whose window had opened by start_date."""
+    derived: Optional[int] = None
+    for week, first_start in week_starts:
+        if first_start <= start_date:
+            derived = week
+    return derived
 
 
 def get_events(
@@ -98,6 +137,8 @@ def get_events(
     data, new_etag = get_tba("events/" + str(year), etag=etag, cache=cache)
     if type(data) is bool:
         return out, new_etag
+    week_starts = _week_calendar(data)
+
     for event in data:
         key: str = event["key"]
 
@@ -116,22 +157,36 @@ def get_events(
             if year < 2025:
                 continue
             try:
-                event_teams = get_event_teams(key, etag=None, cache=cache)[0]
+                teams_path = f"event/{key}/teams/simple"
+                matches_path = f"event/{key}/matches"
+                event_teams = get_event_teams(
+                    key, etag=None, cache=_probe_cache(teams_path, cache)
+                )[0]
                 # remove events with less than 6 teams
                 if len(event_teams) < 6:
                     continue
-                if len(set(PLACEHOLDER_TEAMS).intersection(set(event_teams))) > 0:
-                    continue
-                matches = get_tba(f"event/{key}/matches", etag=None, cache=cache)[0]
+                # Placeholder teams (FIRST's 9970-9999 demo entries) are NOT
+                # grounds to drop the event: they routinely pad rosters at
+                # otherwise healthy offseason events. The EPA protection sits
+                # a layer down — src/models/template.py sets skip_update for
+                # any match containing one, and offseason events are frozen
+                # regardless. Stripping them here is not an option either:
+                # get_event_matches drops any alliance with <3 teams, so
+                # removing a demo team would delete the real match with it.
+                matches = get_tba(
+                    matches_path, etag=None, cache=_probe_cache(matches_path, cache)
+                )[0]
                 end_date = datetime.strptime(event["end_date"], "%Y-%m-%d")
                 if len(matches) == 0 and (datetime.now() - end_date).days >= 1:  # type: ignore
                     continue
                 for match in matches:  # type: ignore
                     all_teams = match["alliances"]["red"]["team_keys"]
                     all_teams += match["alliances"]["blue"]["team_keys"]
-                    all_teams = [int(x[3:]) for x in all_teams]  # asserts no B teams
+                    # B/C/D teams parse into packed ids rather than raising, so
+                    # they no longer take the event down with them. Anything
+                    # still unparseable is genuinely broken data: drop it.
+                    all_teams = [parse_team(x) for x in all_teams]
             except Exception:
-                # remove events with B teams
                 continue
 
         event_type_dict: Dict[int, EventType] = defaultdict(lambda: EventType.INVALID)
@@ -162,6 +217,14 @@ def get_events(
 
         if event_type == EventType.OFFSEASON:
             event["week"] = 9
+
+        # An override moves an event off the type TBA gave it, and with it off
+        # the branch that would have assigned a week. TBA reports week=null
+        # for type-99 events, so an override like 2026isrtp (99 -> DISTRICT)
+        # arrived week-less and was silently deleted by the rule below. Place
+        # it in the competition window its start date falls in.
+        if event.get("week") is None and key in EVENT_TYPE_OVERRIDES:
+            event["week"] = _derive_week(event["start_date"], week_starts)
 
         # filter out incomplete events
         if "week" not in event or event["week"] is None:
@@ -270,8 +333,8 @@ def get_event_matches(
             if year == 2015 and match["comp_level"] == "qm":
                 winner = None
 
-        red_teams = [team[3:] for team in red_teams]
-        blue_teams = [team[3:] for team in blue_teams]
+        red_teams = [str(parse_team(team)) for team in red_teams]
+        blue_teams = [str(parse_team(team)) for team in blue_teams]
 
         breakdown = match.get("score_breakdown", {}) or {}
         red_breakdown = clean_breakdown(
@@ -335,13 +398,17 @@ def get_event_matches(
             "red_1": int(red_teams[0]),
             "red_2": int(red_teams[1]),
             "red_3": int(red_teams[2]) if len(red_teams) > 2 else None,
-            "red_dq": ",".join([t[3:] for t in red_dq_teams]),
-            "red_surrogate": ",".join([t[3:] for t in red_surrogate_teams]),
+            "red_dq": ",".join([str(parse_team(t)) for t in red_dq_teams]),
+            "red_surrogate": ",".join(
+                [str(parse_team(t)) for t in red_surrogate_teams]
+            ),
             "blue_1": int(blue_teams[0]),
             "blue_2": int(blue_teams[1]),
             "blue_3": int(blue_teams[2]) if len(blue_teams) > 2 else None,
-            "blue_dq": ",".join([t[3:] for t in blue_dq_teams]),
-            "blue_surrogate": ",".join([t[3:] for t in blue_surrogate_teams]),
+            "blue_dq": ",".join([str(parse_team(t)) for t in blue_dq_teams]),
+            "blue_surrogate": ",".join(
+                [str(parse_team(t)) for t in blue_surrogate_teams]
+            ),
             "winner": winner,
             "time": time,
             "predicted_time": cast(Optional[int], match["predicted_time"]),
