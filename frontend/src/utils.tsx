@@ -18,6 +18,27 @@ export const capitalize = (str: string) => {
   return str.charAt(0).toUpperCase() + str.slice(1);
 };
 
+// Second robots (604B, 498E) have no team number of their own, so they are
+// packed into the integer team id: the number in the low 16 bits, the suffix
+// letter in the bits above. Mirrors format_team in
+// backend/src/tba/clean_data.py. Plain numbers and team names pass through
+// untouched, so this is safe to apply to any team cell.
+const TEAM_NUMBER_BITS = 16;
+const TEAM_NUMBER_MASK = (1 << TEAM_NUMBER_BITS) - 1;
+const TEAM_SUFFIXES = "BCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+export const formatTeamNumber = (team: number | string): string => {
+  const num = typeof team === "number" ? team : Number(team);
+  if (!Number.isInteger(num) || num <= TEAM_NUMBER_MASK) {
+    return String(team);
+  }
+  const suffixIndex = (num >> TEAM_NUMBER_BITS) - 1;
+  if (suffixIndex < 0 || suffixIndex >= TEAM_SUFFIXES.length) {
+    return String(team);
+  }
+  return `${num & TEAM_NUMBER_MASK}${TEAM_SUFFIXES[suffixIndex]}`;
+};
+
 export const log = (...args: any[]) => {
   if (!PROD) {
     console.log(...args);
