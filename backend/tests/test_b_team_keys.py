@@ -8,7 +8,12 @@ high bits of the integer team id every table already stores.
 """
 
 import src.tba.read_tba as rt
-from src.tba.clean_data import TEAM_NUMBER_MASK, format_team, parse_team
+from src.tba.clean_data import (
+    TEAM_NUMBER_MASK,
+    format_team,
+    is_synthetic_team,
+    parse_team,
+)
 from src.types.enums import EventType
 from tests.test_offseason_ingest import YEAR, mk_event, mk_teams, patch_tba
 
@@ -139,3 +144,39 @@ def test_rankings_survive_a_b_team_row(monkeypatch):
     assert out[604] == 4
     assert out[841] == 5
     assert out[parse_team("frc5507B")] == 3
+
+
+"""
+Synthetic competitors must stay out of year-level populations. norm_epa is a
+rank/percentile mapping over the year's teams and the *_epa_rank fields index
+sorted team lists, so letting these into the population shifted norm_epa for
+1604 real teams on the first deploy. Upstream never had them: its offseason
+filters dropped any event containing one.
+"""
+
+
+def test_placeholder_demo_robots_are_synthetic():
+    for team in [9970, 9985, 9999]:
+        assert is_synthetic_team(team)
+
+
+def test_packed_second_robots_are_synthetic():
+    for key in ["frc604B", "frc498E", "frc10988B"]:
+        assert is_synthetic_team(parse_team(key))
+
+
+def test_real_teams_are_not_synthetic():
+    # 9969 sits just under the placeholder band; 11258 is a real high number.
+    for team in [1, 254, 604, 9969, 10000, 11258, TEAM_NUMBER_MASK]:
+        assert not is_synthetic_team(team)
+
+
+def test_synthetic_teams_excluded_from_year_population():
+    """The exclusion must be at the population level, not by dropping the
+    team-year: their event pages still need epa and team_matches."""
+    import src.data.epa.agg as agg
+
+    src = open(agg.__file__).read()
+    assert "if is_synthetic_team(ty.team):" in src
+    # The guard sits after the per-team fields are computed.
+    assert src.index("ty.team_matches = ") < src.index("if is_synthetic_team(ty.team):")
