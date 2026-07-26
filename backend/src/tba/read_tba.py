@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Dict, List, Optional, Tuple, cast
 
 from src.tba import cache as tba_cache
 from src.tba.breakdown import clean_breakdown, post_clean_breakdown
@@ -113,29 +113,6 @@ def _probe_cache(url: str, cache: bool, tier_probes: bool) -> bool:
     return not tba_cache.needs_revalidation(url, OFFSEASON_REVALIDATION_HOURS)
 
 
-def _week_calendar(data: Any) -> List[Tuple[int, str]]:
-    """(week, earliest start_date) for the year's weeks, ascending. Built from
-    the events TBA does week-stamp, so a week-less event can be placed in the
-    competition window its start date falls in."""
-    firsts: Dict[int, str] = {}
-    for event in data:
-        week, start = event.get("week"), event.get("start_date")
-        if week is None or not start:
-            continue
-        if week not in firsts or start < firsts[week]:
-            firsts[week] = start
-    return sorted(firsts.items(), key=lambda item: item[1])
-
-
-def _derive_week(start_date: str, week_starts: List[Tuple[int, str]]) -> Optional[int]:
-    """The last week whose window had opened by start_date."""
-    derived: Optional[int] = None
-    for week, first_start in week_starts:
-        if first_start <= start_date:
-            derived = week
-    return derived
-
-
 def get_events(
     year: int,
     etag: Optional[str] = None,
@@ -146,7 +123,6 @@ def get_events(
     data, new_etag = get_tba("events/" + str(year), etag=etag, cache=cache)
     if type(data) is bool:
         return out, new_etag
-    week_starts = _week_calendar(data)
 
     for event in data:
         key: str = event["key"]
@@ -228,14 +204,6 @@ def get_events(
 
         if event_type == EventType.OFFSEASON:
             event["week"] = 9
-
-        # An override moves an event off the type TBA gave it, and with it off
-        # the branch that would have assigned a week. TBA reports week=null
-        # for type-99 events, so an override like 2026isrtp (99 -> DISTRICT)
-        # arrived week-less and was silently deleted by the rule below. Place
-        # it in the competition window its start date falls in.
-        if event.get("week") is None and key in EVENT_TYPE_OVERRIDES:
-            event["week"] = _derive_week(event["start_date"], week_starts)
 
         # filter out incomplete events
         if "week" not in event or event["week"] is None:
