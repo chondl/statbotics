@@ -94,16 +94,22 @@ def get_event_teams(
 OFFSEASON_REVALIDATION_HOURS = 24
 
 
-def _probe_cache(url: str, cache: bool) -> bool:
+def _probe_cache(url: str, cache: bool, tier_probes: bool) -> bool:
     """Freshness tier for the offseason quality-filter probes (TBA cache
     design §2.3). Partial cycles re-run the filters every cycle so that an
     event which failed them earlier (empty roster, no schedule yet) can enter
     once TBA fills in — but that must not mean two network round-trips per
-    type-99 event per cycle. Serve the pickle unless the manifest says this
-    path has gone stale; paths with no manifest state fall through to the
-    plain cache path, which fetches when no pickle exists."""
+    type-99 event per cycle, so the pickle is served unless the manifest says
+    this path has gone stale.
+
+    The tier is PARTIAL-ONLY. A full cycle is an explicit "rebuild from TBA":
+    it must revalidate every probe, or a roster cached while the event was
+    still empty survives the rebuild and the event stays dropped — which is
+    exactly what happened to 2026mirr on the first deploy of this code."""
     if cache:
         return True
+    if not tier_probes:
+        return False
     return not tba_cache.needs_revalidation(url, OFFSEASON_REVALIDATION_HOURS)
 
 
@@ -131,7 +137,10 @@ def _derive_week(start_date: str, week_starts: List[Tuple[int, str]]) -> Optiona
 
 
 def get_events(
-    year: int, etag: Optional[str] = None, cache: bool = True
+    year: int,
+    etag: Optional[str] = None,
+    cache: bool = True,
+    tier_probes: bool = False,
 ) -> Tuple[List[EventDict], Optional[str]]:
     out: List[EventDict] = []
     data, new_etag = get_tba("events/" + str(year), etag=etag, cache=cache)
@@ -160,7 +169,7 @@ def get_events(
                 teams_path = f"event/{key}/teams/simple"
                 matches_path = f"event/{key}/matches"
                 event_teams = get_event_teams(
-                    key, etag=None, cache=_probe_cache(teams_path, cache)
+                    key, etag=None, cache=_probe_cache(teams_path, cache, tier_probes)
                 )[0]
                 # remove events with less than 6 teams
                 if len(event_teams) < 6:
@@ -174,7 +183,9 @@ def get_events(
                 # get_event_matches drops any alliance with <3 teams, so
                 # removing a demo team would delete the real match with it.
                 matches = get_tba(
-                    matches_path, etag=None, cache=_probe_cache(matches_path, cache)
+                    matches_path,
+                    etag=None,
+                    cache=_probe_cache(matches_path, cache, tier_probes),
                 )[0]
                 end_date = datetime.strptime(event["end_date"], "%Y-%m-%d")
                 if len(matches) == 0 and (datetime.now() - end_date).days >= 1:  # type: ignore

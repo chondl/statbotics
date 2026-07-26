@@ -249,7 +249,7 @@ def _seed(url, age_hours):
     }
 
 
-def _probe_flags(monkeypatch, key="2026tier"):
+def _probe_flags(monkeypatch, key="2026tier", tier_probes=True):
     calls = []
     patch_tba(
         monkeypatch,
@@ -260,7 +260,7 @@ def _probe_flags(monkeypatch, key="2026tier"):
         },
         calls=calls,
     )
-    rt.get_events(YEAR, cache=False)
+    rt.get_events(YEAR, cache=False, tier_probes=tier_probes)
     return {path: cache for path, _etag, cache in calls if key in path}
 
 
@@ -310,3 +310,17 @@ def test_full_cycle_probes_keep_plain_cache(monkeypatch):
     rt.get_events(YEAR, cache=True)
     flags = {p: c for p, _e, c in calls if key in p}
     assert flags[f"event/{key}/teams/simple"] is True
+
+
+def test_full_cycle_revalidates_every_probe(monkeypatch):
+    """A full cycle is an explicit rebuild from TBA, so the tier must not
+    apply: a roster cached while the event was still empty would otherwise
+    survive the rebuild and keep the event dropped. 2026mirr hit exactly this
+    on the first deploy — TBA had 30 teams, the reprocess served a stale
+    pickle, and the event stayed missing."""
+    key = "2026rebuild"
+    _seed(f"event/{key}/teams/simple", age_hours=1)  # fresh: the tier would skip
+    _seed(f"event/{key}/matches", age_hours=1)
+    flags = _probe_flags(monkeypatch, key, tier_probes=False)
+    assert flags[f"event/{key}/teams/simple"] is False
+    assert flags[f"event/{key}/matches"] is False
