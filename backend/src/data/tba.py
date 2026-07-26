@@ -239,7 +239,9 @@ def process_year(
                 )
 
     def get_events_tba_year(etag: OS, cache: bool) -> Tuple[List[EventDict], OS]:
-        return get_events_tba(year_num, etag=etag, cache=cache)
+        # tier_probes only on partial cycles: a full cycle is an explicit
+        # rebuild and must revalidate every offseason probe against TBA.
+        return get_events_tba(year_num, etag=etag, cache=cache, tier_probes=partial)
 
     # Manifest-backed even in partial cycles. On the explicit-etag path a 304
     # makes get_tba return a bool, so get_events bails out with an EMPTY list

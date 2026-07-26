@@ -68,7 +68,7 @@ def _probe_event(key, end_offset_days):
 
 
 def _patch_probe_fakes(monkeypatch, calls):
-    def fake_events(year, etag=None, cache=True):
+    def fake_events(year, etag=None, cache=True, tier_probes=False):
         calls.append(("events", etag))
         return [], etag  # unchanged
 
@@ -184,7 +184,7 @@ class RecordingTBA:
             self.calls.append(("districts", etag, cache))
             return [], None
 
-        def events(year, etag=None, cache=True):
+        def events(year, etag=None, cache=True, tier_probes=False):
             self.calls.append(("events", etag, cache))
             return [], None
 
