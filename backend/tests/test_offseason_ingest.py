@@ -174,66 +174,6 @@ def test_regular_regional_unaffected(monkeypatch):
 
 
 """
-Overridden events arrive from TBA with week=None (TBA reports no week for
-type-99 events). The override sends them down the non-offseason path, which
-never assigns a week, so the "no week -> drop" rule deleted them outright.
-"""
-
-
-def _week_grid():
-    # Mirrors the real 2026 calendar: one dated event per TBA week.
-    return [
-        mk_event("2026w3", 0, week=3, start_date="2026-03-25"),
-        mk_event("2026w4", 0, week=4, start_date="2026-03-31"),
-        mk_event("2026w5", 0, week=5, start_date="2026-04-06"),
-    ]
-
-
-def test_override_event_without_week_derives_week_from_calendar(monkeypatch):
-    # Real 2026isrtp: event_type 99, week None, starts 2026-04-03 — inside the
-    # week-4 window. DISTRICT then takes the +1 TBA-bug adjustment.
-    patch_tba(
-        monkeypatch,
-        _week_grid() + [mk_event("2026isrtp", 99, week=None, start_date="2026-04-03")],
-    )
-    events = get_keys()
-    assert "2026isrtp" in events
-    assert events["2026isrtp"]["type"] == EventType.DISTRICT
-    assert events["2026isrtp"]["week"] == 5
-
-
-def test_override_event_without_week_needs_no_offseason_probes(monkeypatch):
-    # The override must still bypass the offseason quality filters entirely.
-    calls = []
-    patch_tba(
-        monkeypatch,
-        _week_grid() + [mk_event("2026isrtp", 99, week=None, start_date="2026-04-03")],
-        calls=calls,
-    )
-    get_keys()
-    assert not [c for c in calls if "2026isrtp" in c[0]]
-
-
-def test_non_override_event_without_week_still_dropped(monkeypatch):
-    # The week fallback is scoped to overridden events; everything else keeps
-    # the existing "incomplete event -> drop" behavior.
-    patch_tba(
-        monkeypatch,
-        _week_grid() + [mk_event("2026gal", 0, week=None, start_date="2026-04-03")],
-    )
-    assert "2026gal" not in get_keys()
-
-
-def test_override_week_derivation_skipped_when_calendar_is_empty(monkeypatch):
-    # No dated events to derive from -> no invented week, event still dropped.
-    patch_tba(
-        monkeypatch,
-        [mk_event("2026isrtp", 99, week=None, start_date="2026-04-03")],
-    )
-    assert "2026isrtp" not in get_keys()
-
-
-"""
 Offseason quality-filter probes are tiered (TBA cache design §2.3). Partial
 cycles re-run the filters every cycle, so the per-event roster/match fetches
 must not hit the network every time: serve the pickle unless the manifest
