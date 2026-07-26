@@ -446,8 +446,15 @@ def get_event_rankings(
             return out, new_etag
         rankings = data["rankings"]
         for ranking in rankings:
-            team_num = int(ranking["team_key"][3:])
-            out[team_num] = ranking["rank"]
+            # Per-entry: the outer except returns whatever was parsed so far,
+            # so one unreadable row used to silently truncate the rest of the
+            # table. Every team after the first B team lost its rank and
+            # rendered as -1 (2026sunshow: frc5507B ranked 10th of 31, so 22
+            # teams showed -1).
+            try:
+                out[parse_team(ranking["team_key"])] = ranking["rank"]
+            except (ValueError, KeyError, TypeError):
+                continue
     except Exception:
         pass
 

@@ -113,3 +113,29 @@ def _tba_match(key, red_keys, blue_nums):
         "predicted_time": None,
         "actual_time": 1,
     }
+
+
+def test_rankings_survive_a_b_team_row(monkeypatch):
+    """get_event_rankings parses inside a bare `except: pass`, so one
+    unreadable row used to return the partially-built dict and every team
+    after it rendered as rank -1. 2026sunshow ranked frc5507B 10th of 31,
+    which cost the other 22 teams their rank."""
+    ranks = [
+        {"team_key": "frc581", "rank": 1},
+        {"team_key": "frc973", "rank": 2},
+        {"team_key": "frc5507B", "rank": 3},
+        {"team_key": "frc604", "rank": 4},
+        {"team_key": "frc841", "rank": 5},
+    ]
+    monkeypatch.setattr(
+        rt, "get_tba", lambda path, etag=None, cache=True: ({"rankings": ranks}, None)
+    )
+
+    out, _ = rt.get_event_rankings("2026sunshow")
+
+    # Every team keeps its rank, including the ones after the B team.
+    assert out[581] == 1
+    assert out[973] == 2
+    assert out[604] == 4
+    assert out[841] == 5
+    assert out[parse_team("frc5507B")] == 3
