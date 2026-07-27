@@ -12,8 +12,27 @@
 # Prereqs: gcloud auth (chondl@gmail.com), ADC present, ~/thebluealliance_api_key.txt.
 # All vars below can be overridden on the command line, e.g. `make deploy REGION=us-east1`.
 #
+# ============================================================================
+#  THERE IS EXACTLY ONE WAY TO DEPLOY:  make ship
+# ============================================================================
+#  Do not hand-roll `gcloud builds submit` / `gcloud run deploy`. Do not build
+#  or deploy one service "because only the backend changed". Do not reach for
+#  build-api/build-web/deploy-api/deploy-web directly — they are GUARDED and
+#  will refuse to run outside `make ship` (see require-ship below).
+#
+#  Why this is a hard rule and not a preference: partial and hand-rolled
+#  deploys are how production silently drifts from branch history. An
+#  image-only `gcloud run deploy` typed by hand also drops env/secrets that
+#  `make deploy` preserves. Reasoning "the frontend didn't change, so I'll
+#  skip it" is exactly the judgment call this rule exists to remove — it is
+#  cheap to rebuild an unchanged image and expensive to be wrong.
+#
+#  If you genuinely need a partial deploy, you must opt in explicitly and say
+#  why:  make deploy-api ALLOW_PARTIAL=1
+# ============================================================================
+#
 # Common flows:
-#   make ship                      # build both images + deploy both services (code change)
+#   make ship                      # THE deploy path: build both images + deploy both services
 #   make reprocess-curr-year       # re-ingest current year (picks up new offseason events)
 #   make reprocess-year YEAR=2025  # re-ingest one historical year (process+parquet+hist blobs)
 #   make verify-event EVENT=2026iri
@@ -88,31 +107,61 @@ check-deploy-src:
 	  exit 1; \
 	fi
 
-.PHONY: build build-api build-web
-build: build-api build-web ## Build both container images (Cloud Build -> Artifact Registry)
+# The partial-flow guard. `ship` sets SHIP := 1 as a TARGET-SPECIFIC variable,
+# which GNU make propagates to all of that target's prerequisites — so the
+# build-*/deploy-* targets can tell whether they were reached through `ship`
+# or invoked directly. (Verified on GNU Make 3.81, the macOS system make.)
+#
+# This deliberately blocks the "only the backend changed, so I'll just roll the
+# api" shortcut. Rebuilding an unchanged image is nearly free; shipping half a
+# revision pair, or hand-rolling the gcloud call and dropping env/secrets, is
+# not. Override only with a conscious ALLOW_PARTIAL=1 on the command line.
+.PHONY: require-ship
+require-ship:
+	@test -n "$(SHIP)$(ALLOW_PARTIAL)" || { \
+	  echo "ERROR: '$(MAKECMDGOALS)' is a PARTIAL deploy step — use 'make ship'."; \
+	  echo ""; \
+	  echo "  make ship   builds BOTH images and rolls BOTH services, which is the"; \
+	  echo "              only sanctioned way to deploy this mirror. Partial and"; \
+	  echo "              hand-rolled deploys are how production drifts from branch"; \
+	  echo "              history. See DEPLOY.md section 1."; \
+	  echo ""; \
+	  echo "  If you really mean a partial deploy, opt in explicitly:"; \
+	  echo "      make $(MAKECMDGOALS) ALLOW_PARTIAL=1"; \
+	  exit 1; \
+	}
 
-build-api: check-deploy-src ## Build the backend image
+.PHONY: build build-api build-web
+build: require-ship build-api build-web ## (internal — use `make ship`) Build both container images
+
+build-api: require-ship check-deploy-src ## (internal — use `make ship`) Build the backend image
 	cd $(BACKEND_DIR) && $(GC) builds submit --tag $(IMAGE_API) --timeout=1200 .
 
-build-web: check-deploy-src ## Build the frontend image (BACKEND_URL/BUCKET_URL are inlined at build time)
+build-web: require-ship check-deploy-src ## (internal — use `make ship`) Build the frontend image (BACKEND_URL/BUCKET_URL inlined at build time)
 	cfg=$$(mktemp).yaml; \
 	printf 'steps:\n  - name: gcr.io/cloud-builders/docker\n    args: [build, --build-arg=BACKEND_URL=https://$(API_DOMAIN)/v3/site, --build-arg=BUCKET_URL=https://$(BLOB_DOMAIN), --build-arg=PROD=True, -t, $(IMAGE_WEB), .]\nimages: [$(IMAGE_WEB)]\noptions: {machineType: E2_HIGHCPU_8}\n' > $$cfg; \
 	cd $(FRONTEND_DIR) && $(GC) builds submit --config=$$cfg --timeout=1800 .; \
 	rm -f $$cfg
 
 # --------------------------------- DEPLOY ------------------------------------
-# Image-only updates: preserve the service's existing env/secrets/Cloud SQL/resources.
+# Image-only updates: preserve the service's existing env/secrets/resources.
+# NEVER hand-roll `gcloud run deploy` instead of these — a typed-out deploy
+# re-specifies the container and silently drops env vars and secrets that this
+# image-only `services update` preserves.
 .PHONY: deploy deploy-api deploy-web
-deploy: deploy-api deploy-web ## Deploy both images to Cloud Run (image-only, preserves config)
+deploy: require-ship deploy-api deploy-web ## (internal — use `make ship`) Deploy both images to Cloud Run
 
-deploy-api: ## Roll the backend service to the latest image
+deploy-api: require-ship ## (internal — use `make ship`) Roll the backend service to the latest image
 	$(GC) run services update $(API_SERVICE) --region $(REGION) --image $(IMAGE_API)
 
-deploy-web: ## Roll the frontend service to the latest image
+deploy-web: require-ship ## (internal — use `make ship`) Roll the frontend service to the latest image
 	$(GC) run services update $(WEB_SERVICE) --region $(REGION) --image $(IMAGE_WEB)
 
+# THE deploy path. Everything above is a component of this and is guarded so it
+# cannot be invoked piecemeal by accident.
 .PHONY: ship
-ship: build deploy ## Build both images and deploy both services (the standard code-change flow)
+ship: SHIP := 1
+ship: build deploy ## ⭐ THE ONLY WAY TO DEPLOY: build both images + roll both services
 
 # ---------------------------- DB RETIREMENT (DONE) ----------------------------
 # The `flip-dbless` / `flip-db` targets are GONE, and deliberately so. Phase 2
