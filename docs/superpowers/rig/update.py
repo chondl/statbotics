@@ -1,8 +1,8 @@
 """Rig partial-update cycle — mirrors the production /v3/data/update_curr_year.
 
-    cd .worktrees/rig/backend
-    set -a; source ../../../docs/superpowers/rig/rig.env; set +a
-    PYTHONPATH=$PWD .venv/bin/python ../../../docs/superpowers/rig/update.py
+    cd backend
+    set -a; source ../docs/superpowers/rig/rig.env; set +a
+    PYTHONPATH=$PWD "$(poetry env info -p)/bin/python" ../docs/superpowers/rig/update.py
 
 partial=True loads prior pipeline state from the GCS state snapshot, re-fetches
 TBA with etag caching (tba_partial=True), replays EPA, and republishes changed

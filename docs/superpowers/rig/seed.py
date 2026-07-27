@@ -1,10 +1,10 @@
 """Rig seed script — full db-less current-year (2026) build against fake-gcs.
 
-Run from the backend dir of a worktree with the rig venv and rig.env sourced:
+Run from the repo's backend dir with rig.env sourced:
 
-    cd .worktrees/rig/backend
-    set -a; source ../../../docs/superpowers/rig/rig.env; set +a
-    PYTHONPATH=$PWD .venv/bin/python ../../../docs/superpowers/rig/seed.py
+    cd backend
+    set -a; source ../docs/superpowers/rig/rig.env; set +a
+    PYTHONPATH=$PWD "$(poetry env info -p)/bin/python" ../docs/superpowers/rig/seed.py
 
 partial=False, tba_partial=False -> full recompute of the current year from a
 fresh TBA fetch. There is no database (DB retirement Phase 4): the run writes
