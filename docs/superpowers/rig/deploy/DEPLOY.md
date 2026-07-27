@@ -15,9 +15,9 @@ Cloud Scheduler `statbotics-update` (hourly) + `statbotics-gc` (daily 04:30 UTC)
 Cloud SQL instance, the `db-password` secret, the `cloudsql.client` IAM grant,
 and the `statbotics-seed` DB-mode job are deleted. Serving is
 DuckDB-over-Parquet (`API_BACKEND=duckdb`) and the pipeline writes **GCS only**
-(`DISABLE_DB=True`, now baked into `deploy.sh`'s `step_backend`). The
-`make flip-db` / `make flip-dbless` targets are gone — there is nothing to flip
-back to, and `DISABLE_DB=False` would now take production down. Cloudflare
+— unconditionally, with no mode flag. The `make flip-db` / `make flip-dbless`
+targets are gone, and so is the `DISABLE_DB` flag itself (deleted once it had
+exactly one legal value); there are no modes to switch between. Cloudflare
 Workers front both services + the blob bucket. Cost effect and the verification
 that preceded deletion: [BILLING.md](../BILLING.md).
 
@@ -186,7 +186,8 @@ Component **contracts** — swap any implementation that satisfies these:
    main:app` on `$PORT`. Serves `/v3` (REST), `/v3/site` (frontend-shaped +
    writes blobs), `/v3/data/*` (ETL triggers). Needs TBA egress, **≥2 GiB RAM**
    (8Gi in practice). Env: `PROD=True`, `GCS_BUCKET`, `TBA_AUTH_KEY`,
-   `API_BACKEND=duckdb`, `DISABLE_DB=True`.
+   `API_BACKEND=duckdb`, `BACKEND_URL` (the service's own public URL — the data
+   router calls back through it).
 2. **Relational DB — NONE.** Deleted 2026-07-27. The blob store below is the
    entire datastore; there is no second source of truth to keep in sync.
 3. **Blob store.** Public-read, S3-compatible. Backend writes with
