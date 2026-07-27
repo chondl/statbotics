@@ -26,13 +26,10 @@ CURR_YEAR = 2026
 DISABLE_GCS = False
 HIST_EPOCH = 1
 
-# DB retirement Phase 4 (design 2026-07-20 §2): there is no relational
-# database. Serving and persistence are DuckDB-over-Parquet + GCS blobs, and
-# every DB read/write path has been deleted. DISABLE_DB is kept only as an
-# accepted-but-vestigial env var so the deploy tooling that still sets
-# DISABLE_DB=True (docs/superpowers/rig/deploy/{deploy.sh,Makefile}) keeps
-# working unchanged; nothing branches on it any more.
-DISABLE_DB = os.getenv("DISABLE_DB", "True") == "True"
+# There is no relational database. Serving and persistence are
+# DuckDB-over-Parquet + GCS blobs (DB retirement, completed 2026-07-27).
+# There is deliberately no DISABLE_DB flag: a flag with exactly one legal
+# value is not configuration, it is a trap for whoever sets it the other way.
 
 # MISC
 

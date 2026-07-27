@@ -90,7 +90,7 @@ async def update_curr_year_site_endpoint(background_tasks: BackgroundTasks):
         # degraded state: a persistent snapshot failure (e.g. fingerprint
         # mismatch after a model change) would otherwise starve updates
         # silently behind an ordinary-looking "skipped".
-        data_main.db_less_partial_skipped = True
+        data_main.partial_skipped = True
         return {"status": "skipped", "reason": "snapshot-unreadable"}
     event_objs = list(loaded[0][2].values())
     etags = list(loaded[0][5].values())

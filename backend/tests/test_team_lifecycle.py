@@ -309,23 +309,23 @@ def test_full_cycle_dbless_team_years_failure_skips_publish(monkeypatch):
     # would clobber good blobs and the snapshot — so nothing is published.
     h = PipelineHarness(monkeypatch)
     monkeypatch.setattr(data_main, "get_team_years_db", _raise)
-    monkeypatch.setattr(data_main, "db_less_publish_skipped", False)
+    monkeypatch.setattr(data_main, "publish_skipped", False)
     h.run_full_cycle()
 
     # publish_curr_year never ran: prior published artifacts (snapshot,
     # Parquet, site blobs in the fake GCS recorders) are untouched.
     assert h.snapshot_calls == []
     assert h.storage_calls == []
-    # Degradation is loud: surfaced via /info DB_LESS_PUBLISH_SKIPPED.
-    assert data_main.db_less_publish_skipped is True
+    # Degradation is loud: surfaced via /info PUBLISH_SKIPPED.
+    assert data_main.publish_skipped is True
 
 
 def test_full_cycle_dbless_successful_publish_clears_skip_flag(monkeypatch):
     h = PipelineHarness(monkeypatch)
-    monkeypatch.setattr(data_main, "db_less_publish_skipped", True)
+    monkeypatch.setattr(data_main, "publish_skipped", True)
     h.run_full_cycle()
     assert len(h.storage_calls) == 1
-    assert data_main.db_less_publish_skipped is False
+    assert data_main.publish_skipped is False
 
 
 def test_full_cycle_dbless_storage_failure_leaves_snapshot_behind(monkeypatch):
@@ -374,14 +374,14 @@ def test_partial_cycle_dbless_snapshot_miss_skips_cycle(monkeypatch):
     # validations — so the cycle would publish near-empty objs over good
     # snapshot/blobs/Parquet. Nothing processed, nothing written.
     h = PipelineHarness(monkeypatch)  # read_snapshot -> None
-    monkeypatch.setattr(data_main, "db_less_partial_skipped", False)
+    monkeypatch.setattr(data_main, "partial_skipped", False)
     h.run_partial_cycle()
 
     assert "tba" not in h.events  # no TBA processing at all
     assert h.snapshot_calls == []  # fake GCS untouched
     assert h.storage_calls == []
-    # Degradation is loud: surfaced via /info DB_LESS_PARTIAL_SKIPPED.
-    assert data_main.db_less_partial_skipped is True
+    # Degradation is loud: surfaced via /info PARTIAL_SKIPPED.
+    assert data_main.partial_skipped is True
 
 
 def test_partial_cycle_dbless_snapshot_hit_runs_and_clears_flag(monkeypatch):
@@ -392,13 +392,13 @@ def test_partial_cycle_dbless_snapshot_hit_runs_and_clears_flag(monkeypatch):
     h = PipelineHarness(monkeypatch)
     snap = (create_objs(YEAR), deepcopy(h.start_teams))
     monkeypatch.setattr(data_main, "read_snapshot", lambda year: deepcopy(snap))
-    monkeypatch.setattr(data_main, "db_less_partial_skipped", True)
+    monkeypatch.setattr(data_main, "partial_skipped", True)
     h.run_partial_cycle()
 
     assert "tba" in h.events
     assert len(h.snapshot_calls) == 1
     assert len(h.storage_calls) == 1
-    assert data_main.db_less_partial_skipped is False
+    assert data_main.partial_skipped is False
     # Blobs/manifest first, snapshot last (gate-baseline invariant).
     assert h.events.index("storage") < h.events.index("snapshot")
 
