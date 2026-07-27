@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 logs/
+
+# Kept deliberately local, at the author's request — do not commit.
+# (Accidentally tracked by a `git add -A` in PR #53 and removed again in #54;
+# this entry exists so it cannot happen a third time.)
+PERF-REPROCESS.md
