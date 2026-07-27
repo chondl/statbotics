@@ -2,13 +2,17 @@
 
 STATUS: READY
 
-Shared local end-to-end environment for the two-PR workstream (spec §4). A full
-2026 season is seeded into local CockroachDB and published as GCS blobs into a
-fake-gcs emulator; both backend servers are running; the shared smoke suite
-passes 10/10 against it.
+Shared local end-to-end environment. It mirrors production: **no database** — a
+full 2026 season is computed db-less and published as Parquet tables, a state
+snapshot, and site blobs into a fake-gcs emulator; both backend servers run
+against that bucket; the shared smoke suite passes 10/10 against it.
+
+> The CockroachDB container the rig used before DB retirement is gone (Phase 4,
+> 2026-07-27). The GCS emulator is now the rig's only stateful component, which
+> is exactly the production shape.
 
 All paths below are absolute. Rig scripts/config live under
-`/Users/chondl/learn/statbotics/docs/superpowers/rig/` (untracked). The backend
+`/Users/chondl/learn/statbotics/docs/superpowers/rig/`. The backend
 runs from the **rig worktree** at `/Users/chondl/learn/statbotics/.worktrees/rig`
 (branch `rig-local`). Track agents run their OWN worktree's code by pointing
 `PYTHONPATH` at their backend (see "Track agents: using the rig" below) — no
@@ -20,9 +24,7 @@ tracked files are modified in any worktree.
 
 | Component | Where | Connection |
 |-----------|-------|------------|
-| CockroachDB | docker `crdb-rig` | `cockroachdb://root@localhost:26257/statbotics3?sslmode=disable` (matches `src/constants.py` non-PROD path) |
-| CRDB admin UI | docker `crdb-rig` | http://localhost:8080 |
-| GCS emulator | docker `fake-gcs-rig` (`fsouza/fake-gcs-server`) | http://localhost:4443, bucket `site_dev_v1` |
+| GCS emulator | docker `fake-gcs-rig` (`fsouza/fake-gcs-server`) | http://localhost:4443, bucket `site_dev_v1` — holds Parquet, snapshot, and blobs |
 | API/site server | uvicorn `main:app` | http://127.0.0.1:8000 |
 | Data server (ETL) | uvicorn `main:app` | http://127.0.0.1:8001 |
 
@@ -40,8 +42,10 @@ export PYTHONPATH=/Users/chondl/learn/statbotics/.worktrees/rig/backend
 
 It sets `STORAGE_EMULATOR_HOST=http://localhost:4443` (google-cloud-storage 3.1.0
 honors this — `storage.Client()` auto-uses anonymous creds and hits the emulator,
-verified) plus dummy `GOOGLE_CLOUD_PROJECT`. **PROD is intentionally unset** so
-the app uses the local CRDB conn string and the `site_dev_v1` bucket.
+verified) plus a dummy `GOOGLE_CLOUD_PROJECT`. **PROD is intentionally unset**
+so the app uses the `site_dev_v1` bucket (`src/google/storage.py`) rather than
+the production one. Db-less needs no flag — there is no database code left to
+switch on.
 
 ### TBA API key
 
@@ -68,8 +72,8 @@ the app uses the local CRDB conn string and the `site_dev_v1` bucket.
 /Users/chondl/learn/statbotics/docs/superpowers/rig/stop.sh --docker
 ```
 
-Docker containers and both uvicorn servers are currently UP and stay up.
-`docker start crdb-rig fake-gcs-rig` restores the containers with data intact.
+The fake-gcs container and both uvicorn servers stay up between sessions.
+`docker start fake-gcs-rig` restores the container with data intact.
 Server logs: `docs/superpowers/rig/logs/server{8000,8001}.log`.
 
 To simulate the production outage (Track 2 acceptance 3.4.1), stop only the
@@ -79,8 +83,10 @@ servers (`stop.sh`) and leave the GCS emulator up — pages must render from blo
 
 ## Seeding
 
-Already done: a full 2026 build is loaded (3724 teams, 215 events, 8304
-team_events, 18372 matches; 227 GCS blobs). To reseed from scratch:
+Seed first on an empty rig — a partial cycle refuses to run without a readable
+state snapshot, so `seed.py` is what makes the bucket usable. A full 2026 build
+is roughly 3724 teams, 215 events, 8304 team_events, 18372 matches, ~227 blobs.
+To seed or reseed from scratch:
 
 ```bash
 cd /Users/chondl/learn/statbotics/.worktrees/rig/backend
@@ -90,10 +96,10 @@ export PYTHONPATH=$PWD
 ```
 
 `seed.py` runs `update_curr_year(partial=False, tba_partial=False)` — a full
-current-year recompute from a fresh TBA fetch, writing DB rows and GCS blobs.
-`Base.metadata.create_all` in the script creates the schema if absent (7 tables:
-teams, years, team_years, events, team_events, matches, etags — note
-`team_matches` was dropped from the pipeline in the maintainer's June rework).
+current-year recompute from a fresh TBA fetch. There is no schema step: the run
+writes the year's Parquet tables, the state snapshot, and the site blobs
+straight into the emulator bucket, and those artifacts are the only state the
+rig has.
 
 ## Running one update cycle
 
@@ -117,16 +123,16 @@ curl http://127.0.0.1:8001/v3/data/reset_curr_year         # partial=False, tba_
 
 The pipeline's `Timer` prints per-step durations (Track 1 item D uses these).
 
-### Measured timings (this machine, static 2026 data)
+### Measured timings (this machine, static 2026 data — **historical**)
+
+Captured before DB retirement, when the rig still ran a local CockroachDB. Kept
+only as a dev-machine order-of-magnitude reference; the `Write DB` steps no
+longer exist, so re-measure rather than trusting these.
 
 | Cycle | Total | Dominant steps |
 |-------|-------|----------------|
 | Full build (`partial=False`) | ~230–255 s | TBA fetch ~2m47s (no cache for curr year), Write DB 22–68 s, Write Storage 12–35 s |
 | Partial (`partial=True`), warm etags | ~13–36 s | TBA ~5 s, EPA ~4–6 s, Write DB <1 s, Write Storage 2–18 s |
-
-Write DB is small on partial cycles today because the lossy `changed()` gate
-drops most rows — Track 1 item C removes that gate, so expect Write DB to grow;
-measure it here.
 
 ### Measured PRODUCTION timings (Cloud Run, 2026-07-21, post-perf-program)
 
@@ -138,7 +144,7 @@ Before-numbers are measured production cycles from 2026-07-20/21 pre-change.
 | Probe, no new data (cron/ping) | seconds, no pipeline | unchanged | a few conditional GETs |
 | Fresh-data partial cycle | ~2m10s | **~70 s** | TBA ~29 s (in-window etag checks + daily tier), EPA ~19 s |
 | Full current-year reset (`reset_curr_year`) | ~6m32s (Jul 17) | **~2m07s cold container / archive-warm TBA ~19-42 s** | TBA revalidation, EPA ~18 s, Write Storage ~40 s |
-| Historical-year job (`reprocess-year`) | ~17 min (DB mode) | ~5m09s for the year itself (cold TBA 3m00) + chained curr-year render | TBA cold fetch; DB writes now skipped (job defaults `DISABLE_DB=True`) |
+| Historical-year job (`reprocess-year`) | ~17 min (DB mode) | ~5m09s for the year itself (cold TBA 3m00) + chained curr-year render | TBA cold fetch; no DB writes |
 | Step: Read Snapshot | ~5.8 s | ~3.3-5.3 s (pickle+zstd) | |
 | Step: Write Snapshot | ~33.5 s | ~4-7 s (pickle+zstd) | |
 | Step: Write Storage (partial) | ~36-38 s | ~10-13 s (team-blob gate + orjson) | |
@@ -162,11 +168,12 @@ python3 /Users/chondl/learn/statbotics/docs/superpowers/rig/smoke/smoke.py \
 
 (All flags default to the values above, so bare `python3 smoke.py` works.)
 
-Checks: (1) liveness `/` + `/info`; (2) DB reads `/v3/team/254` (team==254 + EPA
-fields), `/v3/site/team_years/{year}` non-empty; (3) blob reads `teams/all`,
+Checks: (1) liveness `/` + `/info`; (2) API reads `/v3/team/254` (team==254 + EPA
+fields), `/v3/site/team_years/{year}` non-empty — served by DuckDB over Parquet;
+(3) blob reads `teams/all`,
 `team_years/{year}`, one discovered `event/{key}` — fetched, zlib-decompressed,
 parsed, non-trivial; (4) consistency probe — a sampled team's EPA in an
-`event/{key}` blob equals the same team_event EPA from the DB-backed site API
+`event/{key}` blob equals the same team_event EPA from the site API
 (and `team_years` blob == API) within 0.5 pt; (5) `--run-update` triggers a cycle
 on the data server and asserts the publish landed via EITHER path:
 
@@ -187,9 +194,9 @@ Current result against the rig: **10/10 pass** (incl. `--run-update`).
 2.4.1 — "for an upcoming event with no matches, event EPA == year EPA" — cannot
 be reproduced from static 2026, because every 2026 event already has matches, so
 event-specific EPA legitimately differs from year EPA. The smoke probe instead
-asserts **blob == DB-backed API** for the same data, which is the equivalent
-regression guard (it catches the exact "event blob served stale while DB is
-fresh" bug) and is valid on any data. To exercise the true 2.4.1 scenario, Track
+asserts **blob == API** for the same data, which is the equivalent
+regression guard (it catches the exact "event blob served stale while the
+Parquet is fresh" bug) and is valid on any data. To exercise the true 2.4.1 scenario, Track
 1 must construct a fixture: register teams to a synthetic future/no-match event
 (or blank an event's matches) and assert the event-blob EPA tracks year EPA.
 
@@ -222,29 +229,21 @@ Alternatively create a venv in your own worktree from
 
 ## Gotchas / limitations (verified on this rig)
 
-- **`psycopg2` → `psycopg2-binary`.** `requirements.txt` pins source `psycopg2`,
-  which needs libpq/`pg_config` (absent). The rig venv installs
-  `psycopg2-binary` instead (identical `psycopg2` module). Do NOT change the
-  tracked `requirements.txt` in the PR. Rig deps:
-  `docs/superpowers/rig/requirements-rig.txt`.
-- **CockroachDB 16 MiB message buffer.** A single large upsert batch (e.g.
-  refreshing all `team_years`, whose rows are big) exceeds the single-node
-  default `sql.conn.max_read_buffer_message_size` (16 MiB) with a
-  `ProtocolViolation`. `start.sh` raises it to 64 MiB. **Track 1 relevance:** the
-  honest-diff (item C) writes many more `team_years` rows per cycle and can hit
-  this; the bump is a rig-config fix, not a code change — do not "fix" it in the
-  PR, but be aware prod CRDB has different limits.
+- **Seed before any partial cycle.** Db-less partial cycles read prior pipeline
+  state from the GCS state snapshot and nothing else. On an empty bucket the
+  cycle deliberately skips (rather than publishing near-empty artifacts over
+  good ones) and says so in the log. Run `seed.py` first.
 - **Curr-year-only seed fidelity.** Prior years are empty, so absolute EPA seeds
-  differ from prod (fine for gate/diff/publish mechanics per spec §4; NOT for
-  asserting absolute EPA values). Team metadata (names/country/state) is faithful
-  because the seed was run after team rows were populated — `TeamYear.name` comes
-  from the `teams` table (`src/data/tba.py:375`). If you wipe and reseed on a
-  truly empty DB, team_years initially show numeric placeholder names; a second
-  `seed.py` run (after teams exist) or `refresh_teams` fixes them.
+  differ from prod (fine for gate/diff/publish mechanics; NOT for asserting
+  absolute EPA values). Team metadata (names/country/state) is faithful because
+  the seed populates teams before team_years — `TeamYear.name` comes from the
+  teams table (`src/data/tba.py`). On a truly empty bucket team_years can
+  initially show numeric placeholder names; a second `seed.py` run (after teams
+  exist) or `refresh_teams` fixes them.
 - **fake-gcs `size` field is unreliable** in the object-list JSON (reported tiny
   sizes for full blobs). Verify blob content by downloading + decompressing, as
   the smoke suite does — not by the listed size.
 - **Static 2026 = no in-cycle change.** Because 2026 is complete, partial cycles
-  produce near-zero DB deltas and no new `event/{key}` blobs under today's gate.
-  To exercise gate/diff/publish logic, mutate DB rows or blob payloads between
-  cycles (or use the fixture approach noted above).
+  produce near-zero deltas and no new `event/{key}` blobs under today's gate.
+  To exercise gate/diff/publish logic, mutate the published Parquet or blob
+  payloads between cycles (or use the fixture approach noted above).

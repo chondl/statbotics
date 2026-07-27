@@ -9,27 +9,38 @@ cd models
 poetry install
 ```
 
-## Export data from the DB
+## Get the data
+
+Statbotics has no relational database (retired 2026-07-27). The entity tables
+are Parquet files in the public GCS bucket, one directory per season. Pull down
+the two tables this runner needs, resolving the content-hashed keys through the
+manifest:
 
 ```bash
-psql "postgresql://root@localhost:26257/statbotics3?sslmode=disable" -c "\copy (SELECT year,event,comp_level,elim,time,red_1,red_2,red_3,blue_1,blue_2,blue_3,red_score,red_no_foul,blue_score,blue_no_foul,winner FROM matches WHERE winner IS NOT NULL AND red_score IS NOT NULL AND blue_score IS NOT NULL ORDER BY year,time) TO 'matches.csv' WITH CSV HEADER"
-```
-
-```bash
-psql "postgresql://root@localhost:26257/statbotics3?sslmode=disable" -c "\copy (SELECT year,score_mean,score_sd,no_foul_mean FROM years ORDER BY year) TO 'years.csv' WITH CSV HEADER"
+BUCKET=https://storage.googleapis.com/statbotics-staging-site
+curl -s --compressed $BUCKET/manifest.json -o manifest.json
+for YEAR in $(seq 2002 2026); do
+  for TABLE in matches year; do
+    KEY=$(python3 -c "import json,sys; m=json.load(open('manifest.json'))['blobs']; print(m.get('parquet/$YEAR/$TABLE.parquet',''))")
+    [ -n "$KEY" ] || continue
+    mkdir -p parquet/$YEAR && curl -s -o parquet/$YEAR/$TABLE.parquet "$BUCKET/$KEY"
+  done
+done
 ```
 
 ## Run evaluation
 
-```bash
-poetry run python runner.py --model epa --matches-csv matches.csv --years-csv years.csv
-poetry run python runner.py --model wins --matches-csv matches.csv --years-csv years.csv
-```
-
-Or directly against the DB (no CSV export needed):
+Against the Parquet tree (the default; DuckDB reads it directly):
 
 ```bash
 poetry run python runner.py --model epa
+poetry run python runner.py --model wins --parquet-dir ./parquet
+```
+
+Against CSVs instead, if you already have them in the same column layout:
+
+```bash
+poetry run python runner.py --model epa --matches-csv matches.csv --years-csv years.csv
 ```
 
 ## Models

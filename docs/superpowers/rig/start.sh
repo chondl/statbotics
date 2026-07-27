@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
-# Bring up the full rig: CockroachDB, fake-gcs-server, and both backend servers.
+# Bring up the full rig: fake-gcs-server and both backend servers.
 # Idempotent — skips anything already running. Safe to re-run.
+#
+# The rig is db-less, mirroring production (DB retirement Phase 4, 2026-07-27):
+# the only stateful component is the GCS emulator, which holds the Parquet
+# tables, the state snapshot, and the site blobs.
 set -euo pipefail
 
 RIG_DIR="/Users/chondl/learn/statbotics/docs/superpowers/rig"
 BACKEND="/Users/chondl/learn/statbotics/.worktrees/rig/backend"
 VENV="$BACKEND/.venv/bin/python"
-
-# --- CockroachDB (single node, insecure) ---
-if ! docker ps --format '{{.Names}}' | grep -q '^crdb-rig$'; then
-  if docker ps -a --format '{{.Names}}' | grep -q '^crdb-rig$'; then
-    docker start crdb-rig
-  else
-    docker run -d --name crdb-rig -p 26257:26257 -p 8080:8080 \
-      cockroachdb/cockroach:latest-v23.2 start-single-node --insecure
-  fi
-  sleep 4
-fi
-docker exec crdb-rig cockroach sql --insecure \
-  -e "CREATE DATABASE IF NOT EXISTS statbotics3;" >/dev/null
-# Large upserts (honest-diff writes many big team_years rows) exceed the default
-# 16 MiB per-message buffer on a single node; raise it.
-docker exec crdb-rig cockroach sql --insecure \
-  -e "SET CLUSTER SETTING sql.conn.max_read_buffer_message_size = '64MiB';" >/dev/null
 
 # --- fake-gcs-server ---
 if ! docker ps --format '{{.Names}}' | grep -q '^fake-gcs-rig$'; then
@@ -49,4 +36,4 @@ for port in 8000 8001; do
   fi
 done
 sleep 3
-echo "rig up: crdb=26257 gcs=4443 api=8000 data=8001"
+echo "rig up (db-less): gcs=4443 api=8000 data=8001"

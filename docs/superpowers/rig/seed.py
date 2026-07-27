@@ -1,23 +1,25 @@
-"""Rig seed script — full current-year (2026) build against local CockroachDB + fake-gcs.
+"""Rig seed script — full db-less current-year (2026) build against fake-gcs.
 
 Run from the backend dir of a worktree with the rig venv and rig.env sourced:
 
     cd .worktrees/rig/backend
     set -a; source ../../../docs/superpowers/rig/rig.env; set +a
-    .venv/bin/python ../../../docs/superpowers/rig/seed.py
+    PYTHONPATH=$PWD .venv/bin/python ../../../docs/superpowers/rig/seed.py
 
 partial=False, tba_partial=False -> full recompute of the current year from a
-fresh TBA fetch, writes DB rows and GCS blobs. Prior years are left empty (EPA
-seeds differ from prod; fine for gate/diff/publish mechanics per spec §4).
+fresh TBA fetch. There is no database (DB retirement Phase 4): the run writes
+the year's Parquet tables, the state snapshot, and the site blobs into the
+fake-gcs bucket, which is also what every later partial cycle reads from.
+
+Run this first on an empty rig — a partial cycle refuses to run without a
+readable snapshot (see the db-less invariant in src/data/main.py). Prior years
+are left empty, so absolute EPA seeds differ from prod; that is fine for
+gate/diff/publish mechanics, not for asserting absolute EPA values.
 """
 import time
 
 import rig_bootstrap  # noqa: F401  registers models + injects real TBA key
-from src.db.main import Base, engine
 from src.data.main import update_curr_year
-
-# Ensure schema exists (idempotent).
-Base.metadata.create_all(engine)
 
 start = time.time()
 update_curr_year(partial=False, tba_partial=False)

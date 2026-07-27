@@ -1,13 +1,21 @@
 """
 Model evaluation runner.
 
-Loads match + year data (from DB or CSV), iterates matches chronologically,
+Loads match + year data (from Parquet or CSV), iterates matches chronologically,
 and collects win-probability predictions from any Model implementation.
+
+Statbotics has no relational database (retired 2026-07-27); the entity tables
+are Parquet files in GCS, laid out one directory per season:
+
+    parquet/{year}/matches.parquet
+    parquet/{year}/year.parquet
+
+Point --parquet-dir at a local copy of that tree and DuckDB reads it directly.
 
 Usage (from the models/ directory)
 -----------------------------------
     poetry run python runner.py --model epa --matches-csv matches.csv --years-csv years.csv
-    poetry run python runner.py --model wins --db "postgresql://root@localhost:26257/statbotics3?sslmode=disable"
+    poetry run python runner.py --model wins --parquet-dir ./parquet
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ _MATCH_QUERY = """
         m.red_score, m.red_no_foul,
         m.blue_score, m.blue_no_foul,
         m.winner
-    FROM matches m
+    FROM read_parquet(?, union_by_name = true) m
     WHERE m.winner   IS NOT NULL
       AND m.red_score  IS NOT NULL
       AND m.blue_score IS NOT NULL
@@ -38,19 +46,24 @@ _MATCH_QUERY = """
 
 _YEAR_QUERY = """
     SELECT year, score_mean, score_sd, no_foul_mean
-    FROM years
+    FROM read_parquet(?, union_by_name = true)
     ORDER BY year
 """
 
 
-def load_from_db(conn_str: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Connect to CockroachDB/PostgreSQL and return (matches, years)."""
-    import sqlalchemy
+def load_from_parquet(parquet_dir: str = "parquet") -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Read a local copy of the GCS Parquet tree and return (matches, years).
 
-    engine = sqlalchemy.create_engine(conn_str)
-    with engine.connect() as conn:
-        matches = pd.read_sql(_MATCH_QUERY, conn)
-        years = pd.read_sql(_YEAR_QUERY, conn)
+    Expects the published layout: `{parquet_dir}/{year}/matches.parquet` and
+    `{parquet_dir}/{year}/year.parquet`, i.e. what `write_parquet` uploads.
+    """
+    import duckdb
+
+    conn = duckdb.connect()
+    matches = conn.execute(
+        _MATCH_QUERY, [f"{parquet_dir}/*/matches.parquet"]
+    ).df()
+    years = conn.execute(_YEAR_QUERY, [f"{parquet_dir}/*/year.parquet"]).df()
     return matches, years
 
 
@@ -221,13 +234,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a match prediction model.")
     parser.add_argument("--model", default="epa", choices=["epa", "wins"],
                         help="Model to evaluate (default: epa)")
-    parser.add_argument("--db",
-                        default="postgresql://root@localhost:26257/statbotics3?sslmode=disable",
-                        help="SQLAlchemy connection string (used if --matches-csv is not set)")
+    parser.add_argument("--parquet-dir", default="parquet",
+                        help="Local copy of the parquet/{year}/ tree "
+                             "(used if --matches-csv is not set)")
     parser.add_argument("--matches-csv", default=None,
-                        help="Path to matches CSV exported from data.sql")
+                        help="Path to a matches CSV")
     parser.add_argument("--years-csv", default="years.csv",
-                        help="Path to years CSV exported from data.sql (default: years.csv)")
+                        help="Path to a years CSV (default: years.csv)")
     args = parser.parse_args()
 
     model: Model = EPAModel() if args.model == "epa" else WinsModel()
@@ -235,7 +248,7 @@ def main() -> None:
     if args.matches_csv:
         matches, years = load_from_csv(args.matches_csv, args.years_csv)
     else:
-        matches, years = load_from_db(args.db)
+        matches, years = load_from_parquet(args.parquet_dir)
 
     print(f"Loaded {len(matches):,} matches across {matches['year'].nunique()} years.\n")
     preds = evaluate(model, matches, years)

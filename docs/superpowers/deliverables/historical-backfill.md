@@ -48,9 +48,9 @@ district all reach GCS).
   `curl …/v3/data/reset_curr_year` — which creates the manifest, then run the
   full-history build (it re-publishes the current year, now correctly
   seeded, at the end).
-- **No database.** With `DISABLE_DB=True` nothing here touches Postgres. (In
-  DB mode the same run additionally rewrites the DB rows — unchanged
-  behavior until the Phase 4 decommission.)
+- **No database.** Nothing here touches one: the DB was decommissioned on
+  2026-07-27 and the read/write code is gone. GCS is the only store, so the
+  bucket prerequisites above are the whole story.
 
 ## The build
 
@@ -96,7 +96,7 @@ same artifacts, plus the mandatory chained full current-year re-render (team
 blobs embed full history):
 
 ```bash
-make reprocess-year YEAR=2025            # add DISABLE_DB=True to run db-less pre-flip
+make reprocess-year YEAR=2025
 ```
 
 ## Verification checklist

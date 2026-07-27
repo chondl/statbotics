@@ -1,15 +1,17 @@
 """Rig bootstrap — import FIRST in any rig script.
 
-Registers DB models on Base.metadata and, if a real TBA key file is present,
-injects it into the TBA HTTP session at runtime WITHOUT editing any tracked
-file (src/tba/constants.py hardcodes a public key; we override the live header).
+Imports the entity models (still load-bearing db-less: the Parquet writer, the
+state snapshot, and the DuckDB schemas all introspect them) and, if a real TBA
+key file is present, injects it into the TBA HTTP session at runtime WITHOUT
+editing any tracked file (src/tba/constants.py hardcodes a public key; we
+override the live header).
 
 The key file (path below) is `X-TBA-Auth-Key=<value>` (chmod 600). The value is
 never logged. If the file is absent the hardcoded public key is used (it works).
 """
 import os
 
-import src.db.models  # noqa: F401  register all tables on Base.metadata
+import src.db.models  # noqa: F401  register entity models on Base.metadata
 
 TBA_KEY_FILE = "/Users/chondl/thebluealliance_api_key.txt"
 

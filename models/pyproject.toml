@@ -8,8 +8,7 @@ packages = []
 [tool.poetry.dependencies]
 python = "^3.11"
 pandas = "^2.0"
-sqlalchemy = "^2.0"
-psycopg2-binary = "^2.9"
+duckdb = "^1.5"
 
 [build-system]
 requires = ["poetry-core"]

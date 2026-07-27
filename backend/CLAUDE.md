@@ -5,10 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working in the 
 > **This is the `cph-staging` branch — what runs in production (the mirror).**
 > Its architecture differs from the `cph-master`/upstream line: **no database** —
 > DuckDB-over-Parquet serving in a single Cloud Run container, plus offseason
-> support and a read-triggered freshness ping. The **Router Structure** and
-> **Database** sections below still describe the older `cph-master` architecture
-> (CockroachDB, split services) and are being reconciled — for how and *when*
-> EPA recomputes and data refreshes in production, read
+> support and a read-triggered freshness ping. For how and *when* EPA recomputes
+> and data refreshes in production, read
 > [`docs/superpowers/rig/DATA-REFRESH.md`](../docs/superpowers/rig/DATA-REFRESH.md).
 
 ## Commands (run from `backend/`)
@@ -31,15 +29,15 @@ Three FastAPI routers are mounted at `/v3` in `main.py`:
 |--------|-------|---------|
 | `src/api/` | `/v3` | **Public REST API** — consumed by external users and the Python package. One file per entity: `team`, `year`, `team_year`, `event`, `team_event`, `match`, `team_match`. |
 | `src/data/` | `/v3/data` | **ETL triggers** — internal endpoints that run the data pipeline. `update_curr_year` does a partial (incremental) refresh; `reset_curr_year` does a full refresh; `reset_all_years` rebuilds from 2002. |
-| `src/site/` | `/v3/site` | **Frontend-optimized API** — returns pre-shaped data for the website. Also writes results to GCS so the frontend can read from the bucket instead of hitting the DB directly. |
+| `src/site/` | `/v3/site` | **Frontend-optimized API** — returns pre-shaped data for the website. Also writes results to GCS so the frontend can read blobs from the bucket instead of calling the API at all. |
 
-In dev, the data router calls back to `http://localhost:8001` (a second uvicorn process). The `deploy/` App Engine configs split the routers into separate services, but **production (staging) serves all three routers from one Cloud Run container** — see [DATA-REFRESH.md](../docs/superpowers/rig/DATA-REFRESH.md) and [DEPLOY.md](../docs/superpowers/rig/deploy/DEPLOY.md).
+In dev, the data router calls back to `http://localhost:8001` (a second uvicorn process). **Production (staging) serves all three routers from one Cloud Run container** — see [DATA-REFRESH.md](../docs/superpowers/rig/DATA-REFRESH.md) and [DEPLOY.md](../docs/superpowers/rig/deploy/DEPLOY.md). The leftover App Engine service/dispatch YAML in `deploy/` belongs to the upstream split-service layout and is unused here.
 
 ## Data Pipeline (`src/data/`)
 
 For each year, `process_year()` in `src/data/main.py` runs these steps in order:
 
-1. **`process_year_tba()`** (`src/data/tba.py`) — Fetches teams, events, and matches from The Blue Alliance API (with etag-based caching and a local `cache/` directory). Writes raw objects to DB.
+1. **`process_year_tba()`** (`src/data/tba.py`) — Fetches teams, events, and matches from The Blue Alliance API (with etag-based caching and a local `cache/` directory), returning the raw pipeline objects.
 2. **`process_year_avg()`** (`src/data/avg.py`) — Computes average scores for the year object.
 3. **`process_year_wins()`** (`src/data/wins.py`) — Computes win/loss/tie records.
 4. **`process_year_epa()`** (`src/data/epa/`) — Runs the EPA model:
@@ -47,10 +45,10 @@ For each year, `process_year()` in `src/data/main.py` runs these steps in order:
    - `agg.py` — Aggregates match-level EPA up to event and year level.
    - `metrics.py` — Computes normalized EPA and derived statistics.
 
-After writing to DB, if `year == CURR_YEAR`, results are also compressed (zlib) and uploaded to GCS via `src/google/storage.py`.
+Results are then published to GCS via `src/google/`: Parquet tables per year (`parquet.py`), the pickled state snapshot the next cycle resumes from (`snapshot.py`), and, for `year == CURR_YEAR`, the zlib-compressed site blobs the frontend reads (`storage.py`, `publish.py`). GCS is the only store.
 
 **Two entry points** in `src/data/main.py`:
-- `update_curr_year(partial=True)` — incremental update using existing DB objects.
+- `update_curr_year(partial=True)` — incremental update, resuming from the state snapshot. It refuses to run when the snapshot is unreadable rather than publishing near-empty artifacts over good ones.
 - `update_curr_year(partial=False)` / `reset_all_years()` — full recompute from scratch.
 
 ## EPA Model (`src/models/epa/`)
@@ -78,23 +76,29 @@ This is the largest file to update each season. It contains:
 
 When adding a new season, add a new entry to `all_keys` and a new `clean_breakdown_{year}` function.
 
-## Database (`src/db/`)
+## Entity models and storage (`src/db/`, `src/db_duckdb/`, `src/google/`)
 
-> **DB retirement (this branch): COMPLETE as of 2026-07-27.** Production serves
-> and persists via DuckDB-over-Parquet + GCS. `DISABLE_DB=True` is permanent and
-> the Cloud SQL instance is deleted, so the engine is never constructed and
-> `src/db/read`/`src/db/write` are dead code awaiting removal (Phase 4 step 3 —
-> not yet done). **`src/db/models/` stays load-bearing db-less**:
-> the Parquet, snapshot, and DuckDB schemas all introspect the attrs/ORM
-> classes. The description below is the legacy `cph-master` architecture.
+> **There is no relational database.** DB retirement completed 2026-07-27: the
+> Cloud SQL instance is deleted and the read/write/transaction code is gone.
+> **`src/db/models/` stays load-bearing db-less** — the Parquet writer, the
+> state snapshot, and the DuckDB schemas all introspect the attrs/ORM classes
+> for column names and types, so their `sqlalchemy` imports are legitimate and
+> SQLAlchemy is deliberately retained as a dependency. Only the Postgres driver
+> and the CockroachDB dialect were removed.
 
-CockroachDB via SQLAlchemy 2.0. Seven tables defined in `src/db/models/`:
-`Team`, `Year`, `TeamYear`, `Event`, `TeamEvent`, `Match`, `TeamMatch`.
+Six entities are defined in `src/db/models/`: `Team`, `Year`, `TeamYear`,
+`Event`, `TeamEvent`, `Match`. (`TeamMatch` was dropped from the pipeline in the
+maintainer's June rework.) `src/db/main.py` keeps only the declarative `Base`
+those classes hang off.
 
-- Local dev: `cockroachdb://root@localhost:26257/statbotics3?sslmode=disable`
-- Production: credentials via `CRDB_USER`, `CRDB_PWD`, `CRDB_HOST` env vars
+Where the data actually lives:
 
-`src/db/read/` and `src/db/write/` are split by entity.
+| Concern | Where |
+|---------|-------|
+| Persistence | Parquet, one file per entity per year, in GCS (`src/google/parquet.py`) |
+| Query / serving | DuckDB over those Parquet files (`src/db_duckdb/`, schemas introspected from the models) |
+| Pipeline resume state | A pickled + zstd-compressed snapshot in GCS (`src/google/snapshot.py`) |
+| Frontend reads | Pre-rendered zlib blobs plus a manifest in GCS (`src/google/storage.py`, `publish.py`) |
 
 ## TBA API (`src/tba/`)
 
@@ -144,6 +148,6 @@ See `src/data/CLAUDE.md` for the query and instructions.
 
 ## GCS / Deployment
 
-- Production uses three separate Cloud Run services (api, data, site) defined in `deploy/`.
+- Production is a single Cloud Run container serving all three routers. Deploys go through `make ship` — see [DEPLOY.md](../docs/superpowers/rig/deploy/DEPLOY.md); never hand-roll `gcloud`.
 - GCS buckets: `site_v1` (prod), `site_dev_v1` (dev). The frontend reads from these buckets first, falling back to the site API.
-- Set env var `PROD=True` to enable production DB connection and GCS writes.
+- Set env var `PROD=True` to select the production bucket and backend URL.
