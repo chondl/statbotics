@@ -34,9 +34,6 @@ REGION       ?= us-central1
 AR_REPO      ?= statbotics
 API_SERVICE  ?= statbotics-api
 WEB_SERVICE  ?= statbotics-web
-DB_INSTANCE  ?= statbotics-staging-db
-DB_NAME      ?= statbotics3
-DB_USER      ?= statbotics
 BUCKET_NAME  ?= statbotics-staging-site
 API_DOMAIN   ?= api-statbotics.iterativerefinement.com
 BLOB_DOMAIN  ?= blobs-statbotics.iterativerefinement.com
@@ -47,6 +44,9 @@ UPDATE_SCHED ?= statbotics-update
 GC_SCHED     ?= statbotics-gc
 TBA_SWEEP_SCHED ?= statbotics-tba-sweep
 REFRESH_TEAMS_SCHED ?= statbotics-refresh-teams
+BILLING_ACCT ?= 01DAA6_73BA7B_54EFE1
+BILLING_TABLE ?= $(PROJECT_ID).billing_export.gcp_billing_export_v1_$(BILLING_ACCT)
+DAYS         ?= 30
 
 # Build/deploy from the repository root checkout, which since 2026-07-20 IS the
 # `cph-staging` branch (the deployed fork line) — the former dedicated worktree
@@ -61,8 +61,6 @@ BACKEND_DIR  ?= $(DEPLOY_DIR)/backend
 FRONTEND_DIR ?= $(DEPLOY_DIR)/frontend
 SMOKE        ?= $(MAIN_DIR)/docs/superpowers/rig/smoke/smoke.py
 
-CONN_NAME    := $(PROJECT_ID):$(REGION):$(DB_INSTANCE)
-DATABASE_URL := postgresql+psycopg2://$(DB_USER)@/$(DB_NAME)?host=/cloudsql/$(CONN_NAME)
 IMAGE_API    := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(AR_REPO)/$(API_SERVICE):latest
 IMAGE_WEB    := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(AR_REPO)/$(WEB_SERVICE):latest
 GC           := gcloud --project $(PROJECT_ID)
@@ -116,20 +114,14 @@ deploy-web: ## Roll the frontend service to the latest image
 .PHONY: ship
 ship: build deploy ## Build both images and deploy both services (the standard code-change flow)
 
-# ---------------------------- DB RETIREMENT FLIP ------------------------------
-# Phase 2 of the DB retirement design (docs/superpowers/specs/
-# 2026-07-20-db-retirement-completion-design.md): env-only Cloud Run updates
-# that flip the backend between DB and db-less modes. The image and every
-# other env/secret/binding are preserved — `make ship` never touches env, so
-# the flip survives redeploys until explicitly reversed. The Cloud SQL
-# binding stays attached during the 48 h soak (inert with the flag on; it IS
-# the rollback path) and is only removed in Phase 4.
-.PHONY: flip-dbless flip-db
-flip-dbless: ## Flip the backend to db-less (DISABLE_DB=True; env-only, image preserved). Soak 48 h before Cloud SQL decommission. Rollback: make flip-db
-	$(GC) run services update $(API_SERVICE) --region $(REGION) --update-env-vars DISABLE_DB=True
-
-flip-db: ## Roll back the db-less flip (DISABLE_DB=False). The DB is stale by the flag-on window — run `make reprocess-curr-year` afterward to rehydrate it.
-	$(GC) run services update $(API_SERVICE) --region $(REGION) --update-env-vars DISABLE_DB=False
+# ---------------------------- DB RETIREMENT (DONE) ----------------------------
+# The `flip-dbless` / `flip-db` targets are GONE, and deliberately so. Phase 2
+# flipped production db-less on 2026-07-21T16:07Z; it soaked 5 d 9 h clean, and
+# Phase 4 (2026-07-27) deleted the Cloud SQL instance, the `db-password`
+# secret, and the `cloudsql.client` grant. There is no database to flip back
+# to — `flip-db` would now set DISABLE_DB=False and take production down.
+# DISABLE_DB=True is baked into deploy.sh's step_backend, so a from-scratch
+# stand-up lands db-less without a follow-up step.
 
 # --------------------------- DATA: CURRENT YEAR ------------------------------
 .PHONY: reprocess-curr-year update-curr-year
@@ -146,7 +138,7 @@ tba-sweep: ## Manually run the daily TBA historical revalidation sweep (one roun
 	curl -s --max-time 1800 -w '\nHTTP %{http_code}\n' "$(API_URL)/v3/data/revalidate_tba"
 
 .PHONY: refresh-teams
-refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync; DB writes in DB mode, targeted artifact republish db-less). Normally the statbotics-refresh-teams scheduler runs this at 06:30 UTC.
+refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync + targeted artifact republish). Normally the statbotics-refresh-teams scheduler runs this at 06:30 UTC.
 	curl -s --max-time 1800 -w '\nHTTP %{http_code}\n' "$(API_URL)/v3/data/refresh_teams"
 
 # --------------------------- DATA: HISTORICAL YEAR ---------------------------
@@ -173,24 +165,23 @@ refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync; 
 # edge is fine" caveat does not apply — `jobs execute --wait` returns only
 # when everything (chain included) finished.
 #
-# Works in both modes: pass DISABLE_DB=True to run the job db-less (the Cloud
-# SQL binding + PGPASSWORD below are then inert — kept until Phase 4 removes
-# them). The retired backfill_parquet.py / backfill_blobs.py operator scripts
-# are superseded by this driver + a db-less reset_all_years (see
+# Db-less only since Phase 4 (2026-07-27) deleted the Cloud SQL instance — the
+# binding, DATABASE_URL, and PGPASSWORD are gone from this recipe and DISABLE_DB
+# is pinned True. The retired backfill_parquet.py / backfill_blobs.py operator
+# scripts are superseded by this driver + a db-less reset_all_years (see
 # ../../deliverables/historical-backfill.md).
 JOB_NAME ?= statbotics-reprocess-$(YEAR)
 REPROCESS_DRIVER = import src.db.models, src.data.main as dm; dm.reprocess_year($(YEAR)); print('REPROCESS_$(YEAR)_COMPLETE (parquet + hist blobs + chained curr-year re-render)')
 
 .PHONY: reprocess-year
-reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end, then chain a full current-year re-render. Usage: make reprocess-year YEAR=2025 [REFRESH_TBA=1 to bypass the TBA cache manifest] [DISABLE_DB=True to run db-less]
+reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end, then chain a full current-year re-render. Usage: make reprocess-year YEAR=2025 [REFRESH_TBA=1 to bypass the TBA cache manifest]
 	@set -e; \
 	echo "Reprocessing $(YEAR) (process + parquet + hist blobs) as a Cloud Run job..."; \
 	$(GC) run jobs delete $(JOB_NAME) --region $(REGION) --quiet 2>/dev/null || true; \
 	$(GC) run jobs create $(JOB_NAME) \
 	  --image $(IMAGE_API) --region $(REGION) \
-	  --set-cloudsql-instances $(CONN_NAME) \
-	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)|DATABASE_URL=$(DATABASE_URL)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))|DISABLE_DB=$(or $(DISABLE_DB),True)" \
-	  --set-secrets "TBA_AUTH_KEY=tba-auth-key:latest,PGPASSWORD=db-password:latest" \
+	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))|DISABLE_DB=True" \
+	  --set-secrets "TBA_AUTH_KEY=tba-auth-key:latest" \
 	  --command python --args "^@@@^-c@@@$(REPROCESS_DRIVER)" \
 	  --cpu 2 --memory $(API_MEMORY) --task-timeout 3600 --max-retries 0; \
 	$(GC) run jobs execute $(JOB_NAME) --region $(REGION) --wait; \
@@ -231,6 +222,37 @@ logs: ## Tail recent backend logs
 
 info: ## Show the deployed backend /info
 	@curl -s --max-time 15 "$(API_URL)/info" | python3 -m json.tool
+
+# --------------------------------- BILLING -----------------------------------
+# Actual accrued spend, from the BigQuery billing export (see ../BILLING.md).
+# There is no gcloud/API path to real cost — only pricing and budgets — so these
+# targets query the export directly.
+#
+# Two credit kinds reduce the bill and are broken out separately, because they
+# expire on completely different terms: type DISCOUNT is the Cloud Run free
+# tier (renews monthly, permanent), type PROMOTION is the one-time free-trial
+# credit (finite — when it runs out, `gross` becomes the actual invoice). Read
+# the `gross` column as "what this would cost us today with no credits at all".
+#
+# The last day is always partial: billing rows lag the export by a few hours.
+#
+# The SQL is kept on ONE physical line per target. macOS ships GNU Make 3.81,
+# where the `.ONESHELL:` above is silently ignored (it landed in 3.82) — each
+# recipe line is its own shell, so a multi-line quoted string dies with
+# "unexpected EOF while looking for matching `''". The fragments below keep it
+# readable without multi-line recipes.
+CREDS_ALL   = (SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c)
+CREDS_FREE  = (SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c WHERE c.type="DISCOUNT")
+CREDS_PROMO = (SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c WHERE c.type="PROMOTION")
+BILL_WINDOW = WHERE DATE(usage_start_time) >= DATE_SUB(CURRENT_DATE(), INTERVAL $(DAYS) DAY)
+BQ          = bq query --use_legacy_sql=false --project_id=$(PROJECT_ID) --format=pretty
+
+.PHONY: bill bill-services
+bill: ## Per-day gross / free-tier / trial-credit / net spend. Usage: make bill [DAYS=30]
+	@$(BQ) 'SELECT DATE(usage_start_time) AS day, ROUND(SUM(cost),2) AS gross, ROUND(SUM($(CREDS_FREE)),2) AS free_tier, ROUND(SUM($(CREDS_PROMO)),2) AS trial_credit, ROUND(SUM($(CREDS_ALL)),2) AS credits, ROUND(SUM(cost)+SUM($(CREDS_ALL)),2) AS net FROM `$(BILLING_TABLE)` $(BILL_WINDOW) GROUP BY day ORDER BY day'
+
+bill-services: ## Gross spend per service over the window. Usage: make bill-services [DAYS=30]
+	@$(BQ) 'SELECT service.description AS service, ROUND(SUM(cost),2) AS gross, ROUND(SUM(cost)/COUNT(DISTINCT DATE(usage_start_time)),3) AS per_day FROM `$(BILLING_TABLE)` $(BILL_WINDOW) GROUP BY service HAVING gross > 0 ORDER BY gross DESC'
 
 # --------------------------------- GUARDS / HELP -----------------------------
 .PHONY: require-YEAR require-EVENT help

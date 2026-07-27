@@ -7,15 +7,19 @@ prefer `make <target>` over ad-hoc `gcloud`. Full-history rebuilds are in
 
 Mirror: <https://statbotics.iterativerefinement.com> · API: <https://api-statbotics.iterativerefinement.com>
 GCP project `statbotics-staging` · Cloud Run services `statbotics-api` / `statbotics-web` ·
-Cloud SQL Postgres `statbotics-staging-db` · GCS bucket `statbotics-staging-site` ·
+GCS bucket `statbotics-staging-site` ·
 Cloud Scheduler `statbotics-update` (hourly) + `statbotics-gc` (daily 04:30 UTC) +
 `statbotics-tba-sweep` (daily 05:30 UTC — one historical year's TBA revalidation).
-Serving is DuckDB-over-Parquet (`API_BACKEND=duckdb`). With `DISABLE_DB=True`
-(the DB-retirement Phase 2 flip — `make flip-dbless` / rollback `make flip-db`)
-the pipeline writes **GCS only**; until the flip the DB is also written each
-cycle. **Cloud SQL is in SOAK, not gone:** it stays bound (inert with the flag
-on) as the rollback path until 48 h of clean db-less soak, then Phase 4
-decommissions it. Cloudflare Workers front both services + the blob bucket.
+
+**There is NO database.** DB retirement completed 2026-07-27 (Phase 4): the
+Cloud SQL instance, the `db-password` secret, the `cloudsql.client` IAM grant,
+and the `statbotics-seed` DB-mode job are deleted. Serving is
+DuckDB-over-Parquet (`API_BACKEND=duckdb`) and the pipeline writes **GCS only**
+(`DISABLE_DB=True`, now baked into `deploy.sh`'s `step_backend`). The
+`make flip-db` / `make flip-dbless` targets are gone — there is nothing to flip
+back to, and `DISABLE_DB=False` would now take production down. Cloudflare
+Workers front both services + the blob bucket. Cost effect and the verification
+that preceded deletion: [BILLING.md](../BILLING.md).
 
 ---
 
@@ -31,8 +35,8 @@ make ship        # build both images + roll both services (image-only, preserves
 
 `make ship` = `build` (Cloud Build → Artifact Registry) + `deploy` (image-only
 `gcloud run services update`, which **preserves** each service's env, secrets,
-Cloud SQL binding, CPU/memory). Never hand-set env vars on a redeploy unless you
-mean to change them — the image-only update is deliberate.
+CPU/memory). Never hand-set env vars on a redeploy unless you mean to change
+them — the image-only update is deliberate.
 
 Prereqs: `gcloud` auth (chondl@gmail.com), ADC present, `~/thebluealliance_api_key.txt`,
 `~/statbotics_staging_secret.txt`, `~/iterativerefinement_secret.txt` (Cloudflare).
@@ -143,8 +147,7 @@ Two-tier app + a static blob layer + a periodic trigger:
   S3-compatible)      │ hourly cron GET /v3/site/update_curr_year
                  (scheduler)
 
-  [SOAK] Relational DB (PostgreSQL) — written only when DISABLE_DB=False;
-         rollback path during the 48 h db-less soak, deleted in Phase 4.
+  (No relational DB. The blob store is the whole datastore, 2026-07-27 on.)
 ```
 
 Component **contracts** — swap any implementation that satisfies these:
@@ -153,14 +156,9 @@ Component **contracts** — swap any implementation that satisfies these:
    main:app` on `$PORT`. Serves `/v3` (REST), `/v3/site` (frontend-shaped +
    writes blobs), `/v3/data/*` (ETL triggers). Needs TBA egress, **≥2 GiB RAM**
    (8Gi in practice). Env: `PROD=True`, `GCS_BUCKET`, `TBA_AUTH_KEY`,
-   `API_BACKEND=duckdb`, `DISABLE_DB=True` (db-less; when False, also
-   `DATABASE_URL` — SQLAlchemy Postgres URL; `+psycopg2` + `PGPASSWORD` keeps
-   the password out of the URL; dialect must resolve to `postgresql`).
-2. **Relational DB — SOAK, decommission-pending.** Not part of the db-less
-   contract: with `DISABLE_DB=True` nothing reads or writes it. Kept bound
-   during the 48 h soak purely as the `make flip-db` rollback target
-   (PostgreSQL 15, schema via `Base.metadata.create_all`, 7 tables); Phase 4
-   deletes it after a final `pg_dump` export.
+   `API_BACKEND=duckdb`, `DISABLE_DB=True`.
+2. **Relational DB — NONE.** Deleted 2026-07-27. The blob store below is the
+   entire datastore; there is no second source of truth to keep in sync.
 3. **Blob store.** Public-read, S3-compatible. Backend writes with
    `google-cloud-storage`: a short-TTL `manifest.json` written **last** each
    cycle, immutable `v2/{logical}.{hash}` blobs, legacy unversioned paths, and
@@ -183,20 +181,21 @@ page, list, and API after each cycle.
 
 | Contract | GCP service | Notes |
 |----------|-------------|-------|
-| Backend container | **Cloud Run** `statbotics-api` | `--allow-unauthenticated`, min 0 / max 2, cpu 2 / mem 8Gi, timeout 3600, Cloud SQL via `--add-cloudsql-instances` (unix socket `/cloudsql/CONN`; binding inert once `DISABLE_DB=True`) |
-| Relational DB — **SOAK: decommission after 48 h db-less soak (Phase 4)** | **Cloud SQL** Postgres 15 `db-f1-micro` | ZONAL, 10 GB, public IP; `DATABASE_URL=postgresql+psycopg2://USER@/DB?host=/cloudsql/CONN`, `PGPASSWORD` from Secret Manager. Rollback path for `make flip-db` only — do NOT delete until soak completes + final `pg_dump` export. |
-| Blob store | **GCS** bucket `statbotics-staging-site` | uniform access, `allUsers:objectViewer`, CORS for the frontend origin |
-| Schema + seed — **SOAK: legacy DB-mode stand-up; replaced db-less by [historical-backfill.md](../../deliverables/historical-backfill.md)** | **Cloud Run job** `statbotics-seed` | backend image; `create_all` + `update_curr_year(partial=False)` + `refresh_teams` + partial. Deleted in Phase 4. |
+| Backend container | **Cloud Run** `statbotics-api` | `--allow-unauthenticated`, min 0 / max 2, cpu 2 / mem 8Gi, timeout 3600. No Cloud SQL binding — removed 2026-07-27. |
+| Relational DB | **none** | Deleted 2026-07-27. Final `pg_dump` archived at `gs://statbotics-staging-db-final-export/` (private). |
+| Blob store | **GCS** bucket `statbotics-staging-site` | uniform access, `allUsers:objectViewer`, CORS for the frontend origin. **World-readable — never put dumps or private data here.** |
+| Seed / stand-up | **Cloud Run job** `statbotics-seed` (created on demand by `deploy.sh seed`) | db-less: `reset_all_years` + `refresh_teams` + a trailing partial cycle. See also [historical-backfill.md](../../deliverables/historical-backfill.md). |
 | Frontend container | **Cloud Run** `statbotics-web` | image built with `--build-arg BACKEND_URL=…/v3/site BUCKET_URL=https://$BLOB_DOMAIN PROD=True` |
 | Scheduler | **Cloud Scheduler** `statbotics-update` | `0 * * * *` → backend `/v3/site/update_curr_year` |
 | CDN/DNS/TLS | **Cloudflare** Workers `statbotics-proxy` (+ `statbotics-blob-proxy`) | Worker rewrites Host to the `*.run.app` origin; edge TLS. run.app hosts are stable across revisions, so redeploys need no DNS change. |
-| Secrets | **Secret Manager** `tba-auth-key`, `db-password` | compute SA granted `secretAccessor` (`db-password` is soak-only; deleted with Cloud SQL in Phase 4) |
+| Secrets | **Secret Manager** `tba-auth-key` | compute SA granted `secretAccessor`. `db-password` was deleted with Cloud SQL on 2026-07-27. |
 | Images | **Artifact Registry** repo `statbotics` | built by Cloud Build |
 
-First-time stand-up order (`deploy.sh all`): `apis → sql → bucket → secrets →
-images → backend → seed → frontend → scheduler → dns`. Cloud SQL creation is the
-long pole (~5–10 min). The backend Dockerfile swaps source `psycopg2` →
-`psycopg2-binary` (slim image can't compile the source pin).
+First-time stand-up order (`deploy.sh all`): `apis → bucket → secrets → images →
+backend → seed → frontend → scheduler → dns`. The `sql` step no longer exists.
+The long pole is now `seed`: a db-less `reset_all_years` over 2002–present,
+bounded by TBA fetch time from a cold bucket (task timeout 2 h; ~5–8 min against
+a warm TBA cache).
 
 **Why a Worker instead of a CNAME:** a proxied CNAME to a `run.app` host forwards
 the custom Host, which Cloud Run 404s (it routes by the `*.run.app` host). The
@@ -209,7 +208,7 @@ right Host.
 |-----|-----|-----------------|
 | Cloud Run (service) | **App Runner** / **ECS Fargate** | Same container; set `PORT`, env, VPC connector to RDS. |
 | Cloud Run job (seed) | **ECS RunTask** / CodeBuild | Same image + command override. |
-| Cloud SQL Postgres | **RDS PostgreSQL** (db.t4g.micro) | `DATABASE_URL=postgresql+psycopg2://USER:PWD@HOST:5432/DB` (host+port over VPC, `sslmode=require`). Dialect stays `postgresql`. |
+| ~~Cloud SQL Postgres~~ | — | No longer applicable: there is no database to port. |
 | GCS + public read | **S3** + **CloudFront** | Main surface: backend writes via `google-cloud-storage` (`src/google/storage.py`). Either run a GCS→S3 shim (client honors `STORAGE_EMULATOR_HOST`, as the local rig does against fake-gcs-server) or swap the ~5 call sites to `boto3`. Manifest/versioning logic in `publish.py` is pure/portable. |
 | Cloud Scheduler | **EventBridge Scheduler** | cron `0 * * * *` → HTTP target. |
 | Secret Manager | **Secrets Manager** / SSM | Inject as container env. |

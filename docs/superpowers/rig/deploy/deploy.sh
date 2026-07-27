@@ -2,15 +2,21 @@
 #
 # Reproducible staging deploy for statbotics on Google Cloud.
 #
-# Deploys the whole stack: Cloud SQL (Postgres) + GCS bucket + backend Cloud Run
-# service + seed Cloud Run job + frontend Cloud Run service + Cloud Scheduler +
-# Cloudflare DNS/Worker. Idempotent-ish: safe to re-run; most `create` steps are
-# guarded and fall back to `update`.
+# Deploys the whole stack: GCS bucket + backend Cloud Run service + seed Cloud
+# Run job + frontend Cloud Run service + Cloud Scheduler + Cloudflare DNS/Worker.
+# Idempotent-ish: safe to re-run; most `create` steps are guarded and fall back
+# to `update`.
 #
-# Every account-specific value is a variable (see CONFIG). No secrets are baked in
-# — the DB password is generated (or read from the secret file) and the TBA key is
-# read from a file; both are written to Secret Manager and to a local chmod-600
-# secret file, never echoed.
+# NO DATABASE. DB retirement Phase 4 completed 2026-07-27: the Cloud SQL
+# instance, the `db-password` secret, the `cloudsql.client` IAM grant, and the
+# `statbotics-seed` DB-mode job were all deleted. Serving and the update cycle
+# run entirely on GCS Parquet + DuckDB. The `sql` step is gone; do not add it
+# back. A final pg_dump of the retired DB lives at
+# gs://statbotics-staging-db-final-export/ (private).
+#
+# Every account-specific value is a variable (see CONFIG). No secrets are baked
+# in — the TBA key is read from a file and written to Secret Manager, never
+# echoed.
 #
 # Prereqs on the operator machine:
 #   - gcloud authenticated (gcloud auth login) with rights to the target project
@@ -22,7 +28,6 @@
 # Usage:
 #   Edit the CONFIG block (or export the vars), then:
 #     ./deploy.sh apis         # enable APIs
-#     ./deploy.sh sql          # create Cloud SQL instance + db + user
 #     ./deploy.sh bucket       # create public GCS bucket + CORS
 #     ./deploy.sh secrets      # create Secret Manager entries + IAM
 #     ./deploy.sh images       # build backend + frontend images
@@ -38,14 +43,6 @@ set -euo pipefail
 # ------------------------------- CONFIG --------------------------------------
 PROJECT_ID="${PROJECT_ID:-statbotics-staging}"
 REGION="${REGION:-us-central1}"
-
-# Cloud SQL
-DB_INSTANCE="${DB_INSTANCE:-statbotics-staging-db}"
-DB_TIER="${DB_TIER:-db-f1-micro}"          # smallest shared-core Postgres tier
-DB_VERSION="${DB_VERSION:-POSTGRES_15}"
-DB_NAME="${DB_NAME:-statbotics3}"
-DB_USER="${DB_USER:-statbotics}"
-DB_STORAGE_GB="${DB_STORAGE_GB:-10}"
 
 # GCS bucket (globally unique; cannot be site_v1/site_dev_v1)
 BUCKET_NAME="${BUCKET_NAME:-statbotics-staging-site}"
@@ -88,9 +85,6 @@ BLOB_WORKER_NAME="${BLOB_WORKER_NAME:-statbotics-blob-proxy}"
 
 IMAGE_API="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$API_SERVICE:latest"
 IMAGE_WEB="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$WEB_SERVICE:latest"
-CONN_NAME="$PROJECT_ID:$REGION:$DB_INSTANCE"
-# psycopg2 unix-socket URL; password comes from PGPASSWORD (secret), not the URL.
-DATABASE_URL="postgresql+psycopg2://$DB_USER@/$DB_NAME?host=/cloudsql/$CONN_NAME"
 
 gc() { gcloud --project="$PROJECT_ID" "$@"; }
 
@@ -98,39 +92,9 @@ gc() { gcloud --project="$PROJECT_ID" "$@"; }
 
 step_apis() {
   gc services enable \
-    sqladmin.googleapis.com run.googleapis.com cloudbuild.googleapis.com \
+    run.googleapis.com cloudbuild.googleapis.com \
     artifactregistry.googleapis.com secretmanager.googleapis.com \
     cloudscheduler.googleapis.com storage.googleapis.com compute.googleapis.com
-}
-
-step_sql() {
-  if ! gc sql instances describe "$DB_INSTANCE" >/dev/null 2>&1; then
-    gc sql instances create "$DB_INSTANCE" \
-      --database-version="$DB_VERSION" --tier="$DB_TIER" --region="$REGION" \
-      --availability-type=ZONAL --storage-size="$DB_STORAGE_GB" \
-      --storage-type=HDD --no-backup --quiet
-  fi
-  # Generate/read the DB password and persist it to the local secret file.
-  if [ -f "$STAGING_SECRET_FILE" ] && grep -q '^CLOUDSQL_PASSWORD=' "$STAGING_SECRET_FILE"; then
-    DB_PASSWORD="$(grep '^CLOUDSQL_PASSWORD=' "$STAGING_SECRET_FILE" | cut -d= -f2-)"
-  else
-    DB_PASSWORD="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(28)))')"
-    umask 077
-    {
-      echo "# Statbotics staging secrets — untracked, chmod 600."
-      echo "GCP_PROJECT=$PROJECT_ID"
-      echo "GCP_REGION=$REGION"
-      echo "CLOUDSQL_INSTANCE=$DB_INSTANCE"
-      echo "CLOUDSQL_DB=$DB_NAME"
-      echo "CLOUDSQL_USER=$DB_USER"
-      echo "CLOUDSQL_PASSWORD=$DB_PASSWORD"
-      echo "GCS_BUCKET=$BUCKET_NAME"
-    } > "$STAGING_SECRET_FILE"
-    chmod 600 "$STAGING_SECRET_FILE"
-  fi
-  gc sql databases create "$DB_NAME" --instance="$DB_INSTANCE" 2>/dev/null || true
-  gc sql users create "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD" 2>/dev/null \
-    || gc sql users set-password "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD"
 }
 
 step_bucket() {
@@ -152,22 +116,14 @@ step_secrets() {
   local tba; tba="$(grep -o '=.*' "$TBA_KEY_FILE" | head -1 | cut -c2-)"
   printf '%s' "$tba" | gc secrets create tba-auth-key --data-file=- --replication-policy=automatic 2>/dev/null \
     || printf '%s' "$tba" | gc secrets versions add tba-auth-key --data-file=-
-  local dbpw; dbpw="$(grep '^CLOUDSQL_PASSWORD=' "$STAGING_SECRET_FILE" | cut -d= -f2-)"
-  printf '%s' "$dbpw" | gc secrets create db-password --data-file=- --replication-policy=automatic 2>/dev/null \
-    || printf '%s' "$dbpw" | gc secrets versions add db-password --data-file=-
-
   gc artifacts repositories create "$AR_REPO" --repository-format=docker \
     --location="$REGION" 2>/dev/null || true
 
   local num sa
   num="$(gc projects describe "$PROJECT_ID" --format='value(projectNumber)')"
   sa="${num}-compute@developer.gserviceaccount.com"
-  for s in tba-auth-key db-password; do
-    gc secrets add-iam-policy-binding "$s" \
-      --member="serviceAccount:$sa" --role=roles/secretmanager.secretAccessor
-  done
-  gc projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:$sa" --role=roles/cloudsql.client
+  gc secrets add-iam-policy-binding tba-auth-key \
+    --member="serviceAccount:$sa" --role=roles/secretmanager.secretAccessor
   gc storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" \
     --member="serviceAccount:$sa" --role=roles/storage.objectAdmin
 }
@@ -190,50 +146,40 @@ EOF
 }
 
 # Full-stack mode: serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb).
-# DISABLE_DB=True IS the deployed configuration (DB retirement Phase 2 flip,
-# 2026-07-21T16:07Z, via `make flip-dbless`): the pipeline skips all DB writes
-# and serves from Parquet + the state snapshot. Cloud SQL stays bound only as
-# the rollback path during the 48 h soak (`make flip-db`, then
-# `make reprocess-curr-year` to rehydrate the staled DB); Phase 4 deletes it.
-# NOTE: step_backend's --set-env-vars does NOT include DISABLE_DB, so a
-# from-scratch stand-up (or `deploy.sh backend`) lands in DB mode — re-apply
-# with `make flip-dbless`. `make ship` rolls the image only and preserves env.
+# DISABLE_DB=True is now baked into the deploy, not applied afterwards. The
+# Phase 2 flip (2026-07-21T16:07Z) soaked cleanly and Phase 4 deleted the
+# instance on 2026-07-27, so there is no DB to fall back to: a stand-up that
+# landed in DB mode would simply crash. `make flip-db` no longer has a target.
 API_BACKEND="${API_BACKEND:-duckdb}"
 
 step_backend() {
   gc run deploy "$API_SERVICE" \
     --image="$IMAGE_API" --region="$REGION" --platform=managed \
-    --allow-unauthenticated --add-cloudsql-instances="$CONN_NAME" \
-    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|DATABASE_URL=$DATABASE_URL|API_BACKEND=$API_BACKEND" \
-    --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest,PGPASSWORD=db-password:latest" \
+    --allow-unauthenticated \
+    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|API_BACKEND=$API_BACKEND|DISABLE_DB=True" \
+    --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest" \
     --min-instances=0 --max-instances="$MAX_INSTANCES" \
     --cpu="$API_CPU" --memory="$API_MEMORY" --timeout=3600
 }
 
 step_seed() {
-  # DEPRECATED (DB retirement Phase 2, 2026-07-21): this is a DB-MODE seed —
-  # it creates the SQL schema and runs the pipeline without DISABLE_DB, so it
-  # would compute from (and publish over GCS from) the STALING Cloud SQL data.
-  # Production is db-less; a db-less stand-up replacement lands with Phase 4.
-  # Guarded until then.
-  if [[ "${FORCE_DB_SEED:-}" != "1" ]]; then
-    echo "REFUSING step_seed: DB-mode seed on a db-less deployment would publish" >&2
-    echo "from the staling Cloud SQL DB over good GCS artifacts. If you really" >&2
-    echo "mean it (e.g. after 'make flip-db' + reprocess), rerun with FORCE_DB_SEED=1." >&2
-    exit 1
-  fi
-  # create_all needs the model classes imported first (import src.db.models);
-  # update_curr_year(partial=False) writes GCS blobs BEFORE post_process inserts
-  # Team rows, so a trailing partial cycle re-renders teams/all with teams present.
-  local seed='import src.db.models; from src.data.main import update_curr_year, refresh_teams; from src.db.main import Base, engine; Base.metadata.create_all(engine); update_curr_year(partial=False, tba_partial=False); refresh_teams(); update_curr_year(partial=True, tba_partial=True); print("SEED_COMPLETE")'
+  # Db-less stand-up (DB retirement Phase 4, 2026-07-27). The old DB-mode seed
+  # (create_all + a DB-backed cycle) is gone along with the instance.
+  #
+  # reset_all_years re-ingests 2002..present from TBA and publishes every year's
+  # Parquet + hist/ blobs, then the current-year cycle + refresh_teams render the
+  # teams/ and team/{num} blobs. That IS the whole datastore now — there is
+  # nothing else to seed. The TBA persistent cache makes this ~5-8 min on a warm
+  # bucket; from a cold bucket it is bounded by TBA fetch time, hence the 2 h
+  # task timeout.
+  local seed='import src.db.models; from src.data.main import reset_all_years, refresh_teams, update_curr_year; reset_all_years(); refresh_teams(); update_curr_year(partial=True, tba_partial=True); print("SEED_COMPLETE")'
   gc run jobs delete "$SEED_JOB" --region="$REGION" --quiet 2>/dev/null || true
   gc run jobs create "$SEED_JOB" \
     --image="$IMAGE_API" --region="$REGION" \
-    --set-cloudsql-instances="$CONN_NAME" \
-    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|DATABASE_URL=$DATABASE_URL" \
-    --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest,PGPASSWORD=db-password:latest" \
+    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|DISABLE_DB=True" \
+    --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest" \
     --command=python --args="^@@@^-c@@@$seed" \
-    --cpu=2 --memory="$SEED_MEMORY" --task-timeout=1800 --max-retries=0
+    --cpu=2 --memory="$SEED_MEMORY" --task-timeout=7200 --max-retries=0
   gc run jobs execute "$SEED_JOB" --region="$REGION" --wait
 }
 
@@ -366,7 +312,6 @@ EOF
 
 case "${1:-all}" in
   apis) step_apis ;;
-  sql) step_sql ;;
   bucket) step_bucket ;;
   secrets) step_secrets ;;
   images) step_images ;;
@@ -376,7 +321,7 @@ case "${1:-all}" in
   scheduler) step_scheduler ;;
   dns) step_dns ;;
   all)
-    step_apis; step_sql; step_bucket; step_secrets; step_images
+    step_apis; step_bucket; step_secrets; step_images
     step_backend; step_seed; step_frontend; step_scheduler; step_dns ;;
   *) echo "unknown step: $1" >&2; exit 1 ;;
 esac
