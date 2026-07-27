@@ -68,7 +68,7 @@ def _probe_event(key, end_offset_days):
 
 
 def _patch_probe_fakes(monkeypatch, calls):
-    def fake_events(year, etag=None, cache=True):
+    def fake_events(year, etag=None, cache=True, tier_probes=False):
         calls.append(("events", etag))
         return [], etag  # unchanged
 
@@ -184,7 +184,7 @@ class RecordingTBA:
             self.calls.append(("districts", etag, cache))
             return [], None
 
-        def events(year, etag=None, cache=True):
+        def events(year, etag=None, cache=True, tier_probes=False):
             self.calls.append(("events", etag, cache))
             return [], None
 
@@ -267,7 +267,9 @@ def test_daily_tier_skips_fresh_out_of_window_event(monkeypatch):
 
     data_tba.process_year(CURR_YEAR, [], _objs(event), partial=True, cache=False)
 
-    assert fakes.calls == [("events", "NA", False)]  # year list only
+    # Year list only, on the manifest-backed path (etag=None) so a 304 hands
+    # back the cached list instead of an empty one.
+    assert fakes.calls == [("events", None, False)]
 
 
 def test_daily_tier_ignores_events_without_manifest_state(monkeypatch):
@@ -279,7 +281,25 @@ def test_daily_tier_ignores_events_without_manifest_state(monkeypatch):
 
     data_tba.process_year(CURR_YEAR, [], _objs(event), partial=True, cache=False)
 
-    assert fakes.calls == [("events", "NA", False)]
+    assert fakes.calls == [("events", None, False)]
+
+
+def test_partial_cycle_takes_manifest_path_for_the_event_list(monkeypatch):
+    """The year's event list must never ride the explicit-etag path: a 304
+    there returns a bool, get_events bails with an empty list, and no event is
+    re-evaluated. The offseason quality filters run inside get_events, so an
+    event dropped for "<6 teams" before its roster went up could otherwise
+    never enter, however many cycles ran (2026mirr, July 2026)."""
+    key = str(CURR_YEAR) + "list"
+    event = _event_obj(key, -30, -27, EventStatus.COMPLETED)
+    etag = ETag(CURR_YEAR, str(CURR_YEAR) + "/events", 'W/"stored"')
+    fakes = RecordingTBA(monkeypatch)
+
+    data_tba.process_year(
+        CURR_YEAR, [], _objs(event, [etag]), partial=True, cache=False
+    )
+
+    assert fakes.named("events") == [("events", None, False)]
 
 
 def test_daily_tier_leaves_in_window_events_on_explicit_etag_path(monkeypatch):

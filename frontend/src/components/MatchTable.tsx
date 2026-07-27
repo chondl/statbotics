@@ -5,7 +5,7 @@ import Link from "next/link";
 
 import { CORRECT_COLOR, INCORRECT_COLOR } from "../constants";
 import { APIMatch } from "../types/api";
-import { classnames, round } from "../utils";
+import { classnames, formatTeamNumber, round } from "../utils";
 import { compLevelFullNames, formatMatch } from "./utils";
 
 const lightRed = "#FFEEEE";
@@ -103,7 +103,7 @@ const MatchRow = ({
             )}
             key={`${match.key}-${team}`}
           >
-            {team}
+            {formatTeamNumber(team)}
           </Link>
         ))}
       </div>
@@ -125,7 +125,7 @@ const MatchRow = ({
             )}
             key={`${match.key}-${team}`}
           >
-            {team}
+            {formatTeamNumber(team)}
           </Link>
         ))}
       </div>

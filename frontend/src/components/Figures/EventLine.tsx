@@ -7,7 +7,7 @@ import Select from "react-select";
 import { getTeamEventTeamMatches } from "../../api/event";
 import { BACKEND_URL } from "../../constants";
 import { APITeamEvent, APITeamMatch } from "../../types/api";
-import { classnames, log, round } from "../../utils";
+import { classnames, formatTeamNumber, log, round } from "../../utils";
 import { multiSelectStyles } from "../multiSelect";
 import LineChart from "./Line";
 import { getYAxisOptions } from "./shared";
@@ -67,7 +67,10 @@ const EventLineChart = ({
   const topTeams = teamEvents
     .sort((a, b) => yAxis.yearAccessor(b) - yAxis.yearAccessor(a))
     .slice(0, 3)
-    .map((team) => ({ value: team.team, label: `${team.team} | ${team.team_name}` }));
+    .map((team) => ({
+      value: team.team,
+      label: `${formatTeamNumber(team.team)} | ${team.team_name}`,
+    }));
 
   const selectedTeamNums: number[] = selectedTeams.map((team: any) => team.value);
 
@@ -75,7 +78,7 @@ const EventLineChart = ({
     .filter((teamNum) => allData[teamNum])
     .map((teamNum) => {
       let teamData = {
-        id: teamNum,
+        id: formatTeamNumber(teamNum),
         data: allData[teamNum].map((teamMatch: any, i: number) => ({
           x: i,
           label: allData[teamNum][i - 1]?.match || "Start",
