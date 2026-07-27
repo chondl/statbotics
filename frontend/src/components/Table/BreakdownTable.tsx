@@ -3,7 +3,7 @@ import React, { useMemo, useState } from "react";
 import { createColumnHelper } from "@tanstack/react-table";
 
 import { APITeamEvent, APITeamYear, APIYear } from "../../types/api";
-import { formatTeamNumber, round, truncate } from "../../utils";
+import { round, truncate } from "../../utils";
 import InsightsTable from "./InsightsTable";
 import { TeamLink, formatEPACell } from "./shared";
 
@@ -201,7 +201,7 @@ const EPABreakdownTable = ({
         header: "Team",
         columns: [
           columnHelper.accessor("num", {
-            cell: (info) => formatTeamNumber(info.getValue()),
+            cell: (info) => info.getValue(),
             header: "Number",
           }),
           columnHelper.accessor("team", {

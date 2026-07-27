@@ -4,7 +4,7 @@ import pako from "pako";
 import { BACKEND_URL, BUCKET_URL, DISABLE_GCS } from "../constants";
 import { log, round } from "../utils";
 
-export const version = "v5";
+export const version = "v4";
 
 const MANIFEST_TTL_MS = 60 * 1000;
 

@@ -8,7 +8,6 @@ import Link from "next/link";
 import { getTeamYear } from "../../api/team";
 import { CURR_YEAR } from "../../constants";
 import { TeamYearData, TeamYearRedirect } from "../../types/data";
-import { formatTeamNumber } from "../../utils";
 import PageLayout from "../shared/layout";
 import NotFound from "../shared/notFound";
 import SummaryTabs from "./summaryTabs";
@@ -84,7 +83,7 @@ const PageContent = ({ team, paramYear }: { team: number; paramYear: number }) =
 
   return (
     <PageLayout
-      title={`Team ${formatTeamNumber(team)}`}
+      title={`Team ${team}`}
       year={year}
       setYear={setYear}
       years={yearOptions}
@@ -93,7 +92,7 @@ const PageContent = ({ team, paramYear }: { team: number; paramYear: number }) =
       <div className="w-full flex items-center justify-center mb-4">
         <div className="text-2xl lg:text-3xl">{teamName}</div>
         <Link
-          href={`https://www.thebluealliance.com/team/${formatTeamNumber(team)}`}
+          href={`https://www.thebluealliance.com/team/${team}`}
           rel="noopener noreferrer"
           target="_blank"
           className="ml-4"

@@ -14,7 +14,7 @@ import {
 } from "../../../components/Table/shared";
 import { APITeamEvent } from "../../../types/api";
 import { EventData } from "../../../types/data";
-import { formatTeamNumber, round } from "../../../utils";
+import { round } from "../../../utils";
 
 type SimResults = {
   index: number;
@@ -168,7 +168,7 @@ const SimulationSection = ({ eventId, data }: { eventId: string; data: EventData
   const detailedColumns = useMemo<any>(
     () => [
       detailedColumnHelper.accessor("num", {
-        cell: (info) => formatTeamNumber(info.getValue()),
+        cell: (info) => info.getValue(),
         header: "Number",
       }),
       detailedColumnHelper.accessor("team", {
@@ -207,7 +207,7 @@ const SimulationSection = ({ eventId, data }: { eventId: string; data: EventData
         header: "Predicted Rank",
       }),
       columnHelper.accessor("num", {
-        cell: (info) => formatTeamNumber(info.getValue()),
+        cell: (info) => info.getValue(),
         header: "Number",
       }),
       columnHelper.accessor("team", {

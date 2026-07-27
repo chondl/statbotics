@@ -7,7 +7,7 @@ import Link from "next/link";
 import { CellContext, createColumnHelper } from "@tanstack/react-table";
 
 import { APIYear, EPAPercentiles } from "../../types/api";
-import { classnames, formatTeamNumber, truncate } from "../../utils";
+import { classnames, truncate } from "../../utils";
 import Table from "./Table";
 import { CONDITIONAL_COLORS, getEPAColor, getRPColor } from "./shared";
 
@@ -33,7 +33,7 @@ const TeamLink = ({ team, num, year }: { team: number; num: number; year: number
   return (
     <div className="w-24 h-full flex justify-center items-center">
       <Link href={`/team/${num}/${year}`} className="text_link">
-        {truncate(formatTeamNumber(team), 30)}
+        {truncate(team.toString(), 30)}
       </Link>
     </div>
   );

@@ -6,7 +6,6 @@ from src.data.utils import objs_type
 from src.db.functions import remove_teams_with_no_events, update_team_districts
 from src.db.models import ETag, Event, Team, TeamEvent, TeamYear, match_dict_to_objs
 from src.tba import cache as tba_cache
-from src.tba.clean_data import format_team
 from src.tba.constants import DISTRICT_MAPPING
 from src.tba.read_tba import (
     EventDict,
@@ -239,23 +238,9 @@ def process_year(
                 )
 
     def get_events_tba_year(etag: OS, cache: bool) -> Tuple[List[EventDict], OS]:
-        # tier_probes only on partial cycles: a full cycle is an explicit
-        # rebuild and must revalidate every offseason probe against TBA.
-        return get_events_tba(year_num, etag=etag, cache=cache, tier_probes=partial)
+        return get_events_tba(year_num, etag=etag, cache=cache)
 
-    # Manifest-backed even in partial cycles. On the explicit-etag path a 304
-    # makes get_tba return a bool, so get_events bails out with an EMPTY list
-    # and no event is re-evaluated at all. That matters because the offseason
-    # quality filters live inside get_events, and the data they judge (rosters,
-    # schedules) sits at other URLs with their own etags: the year's event list
-    # only changes on event metadata, so a roster going up never moves it.
-    # An event dropped for "<6 teams" while its roster was empty could then
-    # never re-enter, no matter how many cycles ran (2026mirr, July 2026).
-    # revalidate=True serves the cached list on a 304, so the filters re-run;
-    # read_tba tiers the per-event probes so this stays cheap.
-    events, _ = call_tba(
-        get_events_tba_year, str(year_num) + "/events", revalidate=True
-    )
+    events, _ = call_tba(get_events_tba_year, str(year_num) + "/events")
 
     for event in events:
         key = event["key"]
@@ -415,12 +400,9 @@ def process_year(
         # For Upcoming, Ongoing, and Completed events
         for team in event_teams:
             if team not in teams_dict:
-                # B/C/D teams have no TBA team entry, so they always land here.
-                # format_team turns the packed id back into "604B" for display;
-                # plain numbers are unaffected.
                 teams_dict[team] = Team(
                     team=team,
-                    name=format_team(team),
+                    name=str(team),
                     country=None,
                     state=None,
                     rookie_year=None,

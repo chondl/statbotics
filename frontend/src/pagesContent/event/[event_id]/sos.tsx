@@ -14,7 +14,7 @@ import {
   formatPercentileCell,
 } from "../../../components/Table/shared";
 import { EventData } from "../../../types/data";
-import { formatTeamNumber, round } from "../../../utils";
+import { round } from "../../../utils";
 
 type SosDatum = {
   preSimAvgRank: number;
@@ -154,7 +154,7 @@ const SosSection = ({ eventId, data }: { eventId: string; data: EventData }) => 
         header: "Rank",
       }),
       columnHelper.accessor("num", {
-        cell: (info) => formatTeamNumber(info.getValue()),
+        cell: (info) => info.getValue(),
         header: "Number",
       }),
       columnHelper.accessor("team", {
@@ -192,7 +192,7 @@ const SosSection = ({ eventId, data }: { eventId: string; data: EventData }) => 
         header: "Rank",
       }),
       detailedColumnHelper.accessor("num", {
-        cell: (info) => formatTeamNumber(info.getValue()),
+        cell: (info) => info.getValue(),
         header: "Number",
       }),
       detailedColumnHelper.accessor("team", {

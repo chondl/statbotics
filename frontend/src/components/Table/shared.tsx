@@ -5,7 +5,7 @@ import Link from "next/link";
 import { CellContext } from "@tanstack/react-table";
 
 import { EPAPercentiles } from "../../types/api";
-import { classnames, formatTeamNumber, truncate } from "../../utils";
+import { classnames, truncate } from "../../utils";
 
 export const TeamLink = ({
   team,
@@ -26,7 +26,7 @@ export const TeamLink = ({
       )}
     >
       <Link href={`/team/${num}/${year}`} className="text_link">
-        {truncate(formatTeamNumber(team), 30)}
+        {truncate(team.toString(), 30)}
       </Link>
     </div>
   );

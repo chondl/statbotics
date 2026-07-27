@@ -9,7 +9,7 @@ import { TeamLink, formatCell, formatEPACell } from "../../../components/Table/s
 import { CURR_YEAR, RP_NAMES } from "../../../constants";
 import { APITeamEvent } from "../../../types/api";
 import { EventData } from "../../../types/data";
-import { formatTeamNumber, round, truncate } from "../../../utils";
+import { round, truncate } from "../../../utils";
 
 export type TeamEventInsights = {
   num: number;
@@ -75,7 +75,7 @@ const PageEventInsightsTable = ({ eventId, data }: { eventId: string; data: Even
     () =>
       [
         columnHelper.accessor("num", {
-          cell: (info) => formatTeamNumber(info.getValue()),
+          cell: (info) => info.getValue(),
           header: "Number",
         }),
         columnHelper.accessor("team", {
