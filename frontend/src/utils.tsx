@@ -39,6 +39,24 @@ export const formatTeamNumber = (team: number | string): string => {
   return `${num & TEAM_NUMBER_MASK}${TEAM_SUFFIXES[suffixIndex]}`;
 };
 
+// Inverse of formatTeamNumber, for TBA keys read in the browser. Must NOT be
+// done with parseInt: parseInt("604B") silently returns 604, which collapses a
+// second robot onto its base team -- that duplicated 604/5507/6884 in the
+// Alliance Insights table and gave 604B the real 604's EPA.
+export const parseTeamKey = (key: string): number => {
+  const raw = (key.startsWith("frc") ? key.slice(3) : key).toUpperCase();
+  const match = /^(\d+)([B-Z]?)$/.exec(raw);
+  if (!match) {
+    return NaN;
+  }
+  const num = parseInt(match[1], 10);
+  if (num > TEAM_NUMBER_MASK) {
+    return NaN;
+  }
+  const suffix = match[2] ? TEAM_SUFFIXES.indexOf(match[2]) + 1 : 0;
+  return (suffix << TEAM_NUMBER_BITS) | num;
+};
+
 export const log = (...args: any[]) => {
   if (!PROD) {
     console.log(...args);
@@ -58,7 +76,7 @@ export const readTBA = async (url: string) => {
 };
 
 export const getMediaUrl = async (team: number, year: number) => {
-  const data = await readTBA(`/team/frc${team}/media/${year}`);
+  const data = await readTBA(`/team/frc${formatTeamNumber(team)}/media/${year}`);
   const image = data.filter((item: any) => item?.preferred)?.[0];
   if (image?.type === "instagram-image") {
     // if (image?.view_url) {

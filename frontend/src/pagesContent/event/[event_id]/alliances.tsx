@@ -6,13 +6,13 @@ import { BarChartNoLegend } from "../../../components/Figures/Bar";
 import InsightsTable from "../../../components/Table/InsightsTable";
 import { TeamLink, formatCell, formatEPACell } from "../../../components/Table/shared";
 import { EventData } from "../../../types/data";
-import { readTBA, round } from "../../../utils";
+import { parseTeamKey, readTBA, round } from "../../../utils";
 
 const getAlliances = async (eventId: string) => {
   const rawAlliances = await readTBA(`/event/${eventId}/alliances`);
   const alliances = rawAlliances?.map((alliance, i) => ({
     rank: i + 1,
-    teams: alliance?.picks?.map((pick) => parseInt(pick?.slice(3))),
+    teams: alliance?.picks?.map((pick) => parseTeamKey(pick)),
     record: `${alliance?.status?.record?.wins}-${alliance?.status?.record?.losses}-${alliance?.status?.record?.ties}`,
     status: alliance?.status?.status,
   }));
