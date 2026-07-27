@@ -13,7 +13,7 @@ against that bucket; the shared smoke suite passes 10/10 against it.
 
 All paths below are absolute. Rig scripts/config live under
 `/Users/chondl/learn/statbotics/docs/superpowers/rig/`. The backend
-runs from the **rig worktree** at `/Users/chondl/learn/statbotics/.worktrees/rig`
+runs from the **primary checkout** at `/Users/chondl/learn/statbotics` (the `cph-staging` tip — i.e. the code that actually ships)
 (branch `rig-local`). Track agents run their OWN worktree's code by pointing
 `PYTHONPATH` at their backend (see "Track agents: using the rig" below) — no
 tracked files are modified in any worktree.
@@ -37,7 +37,7 @@ Bucket name is `site_dev_v1` because the app is run non-PROD
 
 ```bash
 set -a; source /Users/chondl/learn/statbotics/docs/superpowers/rig/rig.env; set +a
-export PYTHONPATH=/Users/chondl/learn/statbotics/.worktrees/rig/backend
+export PYTHONPATH=/Users/chondl/learn/statbotics/backend
 ```
 
 It sets `STORAGE_EMULATOR_HOST=http://localhost:4443` (google-cloud-storage 3.1.0
@@ -89,7 +89,7 @@ is roughly 3724 teams, 215 events, 8304 team_events, 18372 matches, ~227 blobs.
 To seed or reseed from scratch:
 
 ```bash
-cd /Users/chondl/learn/statbotics/.worktrees/rig/backend
+cd /Users/chondl/learn/statbotics/backend
 set -a; source /Users/chondl/learn/statbotics/docs/superpowers/rig/rig.env; set +a
 export PYTHONPATH=$PWD
 .venv/bin/python /Users/chondl/learn/statbotics/docs/superpowers/rig/seed.py
@@ -107,7 +107,7 @@ Partial cycle (what the tracks measure before/after; mirrors prod
 `/v3/data/update_curr_year`):
 
 ```bash
-cd /Users/chondl/learn/statbotics/.worktrees/rig/backend
+cd /Users/chondl/learn/statbotics/backend
 set -a; source /Users/chondl/learn/statbotics/docs/superpowers/rig/rig.env; set +a
 export PYTHONPATH=$PWD
 .venv/bin/python /Users/chondl/learn/statbotics/docs/superpowers/rig/update.py
@@ -211,7 +211,7 @@ Run YOUR worktree's backend code against the shared rig by overriding
 WT=/Users/chondl/learn/statbotics/.worktrees/epa-consistency   # or bucket-first-serving
 set -a; source /Users/chondl/learn/statbotics/docs/superpowers/rig/rig.env; set +a
 export PYTHONPATH=$WT/backend
-PY=/Users/chondl/learn/statbotics/.worktrees/rig/backend/.venv/bin/python
+PY=$(cd /Users/chondl/learn/statbotics/backend && poetry env info -p)/bin/python
 
 # serve your code (stop the rig's 8000/8001 first if you want your build there):
 PORT=8000 $PY /Users/chondl/learn/statbotics/docs/superpowers/rig/serve.py &

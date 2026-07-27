@@ -3,9 +3,17 @@ name = "backend"
 version = "0.1.0"
 description = ""
 authors = ["Abhijit Gupta <avgupta456@gmail.com>"]
+# This is an application, not a library — there is no `backend` package to
+# install. Without this, `poetry install` resolves and installs every
+# dependency and then fails on the final "installing the current project" step.
+package-mode = false
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.12"
+# Must be >=3.11: duckdb (added with DuckDB-over-Parquet serving) requires
+# >=3.10, and the pinned release requires >=3.11, so the old ">=3.9,<3.12"
+# made `poetry install` fail resolution outright — nobody could set the
+# backend up from scratch. Production runs python:3.11-slim (see Dockerfile).
+python = ">=3.11,<3.12"
 fastapi = "^0.101.1"
 python-dotenv = "^1.0.0"
 uvicorn = "^0.23.2"
