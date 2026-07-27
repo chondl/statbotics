@@ -25,7 +25,6 @@
     "**/.pytest_cache": true,
     "**/.coverage": true,
     "**/build": true,
-    "**/node_modules": true,
-    "**/cockroach-data": true
+    "**/node_modules": true
   }
 }

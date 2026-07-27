@@ -4,7 +4,7 @@
 
 Before week 1 data exists, `avg.py` has a year-specific override block that hardcodes the component means used to seed EPA ratings. The block is skipped automatically once week 1 matches are present.
 
-The store is GCS Parquet (DB retirement): run the aggregates with DuckDB over `parquet/{YEAR}/matches.parquet`. The Parquet lives at a content-hashed key, so resolve it through the manifest first, then query the downloaded file (note: RP columns are booleans and require `::int` cast — same as the old SQL):
+The store is GCS Parquet: run the aggregates with DuckDB over `parquet/{YEAR}/matches.parquet`. The Parquet lives at a content-hashed key, so resolve it through the manifest first, then query the downloaded file (note: RP columns are booleans and require an `::int` cast):
 
 ```bash
 KEY=$(curl -s --compressed https://storage.googleapis.com/statbotics-staging-site/manifest.json \

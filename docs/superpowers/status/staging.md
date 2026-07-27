@@ -301,15 +301,11 @@ the merge intact.
 
 | Resource | Type | Name | Region / tier / config |
 |----------|------|------|------------------------|
-| Cloud SQL | Postgres 15 | `statbotics-staging-db` | us-central1, `db-f1-micro`, ZONAL, 10 GB HDD, no backups, public IP `34.63.163.28`; conn name `statbotics-staging:us-central1:statbotics-staging-db`; db `statbotics3`, user `statbotics` |
 | GCS bucket | Standard | `statbotics-staging-site` | us-central1, uniform access, `allUsers` objectViewer (public read), CORS for the staging origin; ~75 MB, ~8.2k objects |
 | Artifact Registry | docker repo | `statbotics` | us-central1; holds `statbotics-api`, `statbotics-web` images |
 | Secret Manager | secret | `tba-auth-key` | TBA API key (real key from `~/thebluealliance_api_key.txt`) |
-| Secret Manager | secret | `db-password` | Cloud SQL password |
-| Cloud Run svc | service | `statbotics-api` | us-central1, image `statbotics-api:latest`, **cpu 2 / mem 8Gi**, min 0 / max 2, Cloud SQL socket, `PROD=True`, `GCS_BUCKET`, `DATABASE_URL` (no password — `PGPASSWORD` from secret), **`API_BACKEND=duckdb`**, `TBA_AUTH_KEY` from secret, timeout 3600 |
-| Cloud Run job | job | `statbotics-parquet-backfill` | us-central1, backend image, cpu 2 / mem 4Gi, Cloud SQL socket; one-off DB→Parquet historical backfill (`backfill_parquet.py`); kept for re-runs (`--verify` row-count check) |
+| Cloud Run svc | service | `statbotics-api` | us-central1, image `statbotics-api:latest`, **cpu 2 / mem 8Gi**, min 0 / max 2, `PROD=True`, `GCS_BUCKET`, **`API_BACKEND=duckdb`**, `TBA_AUTH_KEY` from secret, timeout 3600 |
 | Cloud Run svc | service | `statbotics-web` | us-central1, image `statbotics-web:latest`, cpu 1 / mem 1Gi, min 0 / max 2, `next start` |
-| Cloud Run job | job | `statbotics-seed` | us-central1, backend image, cpu 2 / mem 4Gi, Cloud SQL socket; schema create + full current-year build + a trailing partial cycle |
 | Cloud Scheduler | http job | `statbotics-update` | us-central1, `0 * * * *`, GET `…/v3/site/update_curr_year`, deadline 1800s |
 | Cloud Scheduler | http job | `statbotics-gc` | us-central1, `30 4 * * *`, GET `…/v3/data/gc_blobs` (48h grace default) |
 | Cloudflare | AAAA (proxied) | `statbotics`, `api-statbotics`, `blobs-statbotics` | placeholder `100::`, orange-cloud, so the Worker routes intercept |
@@ -317,12 +313,20 @@ the merge intact.
 | Cloudflare | Worker | `statbotics-blob-proxy` | reverse-proxy for the public bucket; edge-caches immutable blobs, manifest uncached (see `cf-blob-proxy.md`) |
 | Cloudflare | routes | 3 | `statbotics.…/*`, `api-statbotics.…/*` → `statbotics-proxy`; `blobs-statbotics.…/*` → `statbotics-blob-proxy` |
 
-Compute/service SA (`630091002690-compute@developer.gserviceaccount.com`)
-granted: `secretmanager.secretAccessor` on both secrets, `cloudsql.client` on the
-project, `storage.objectAdmin` on the bucket.
+> **Deleted 2026-07-27 (DB retirement Phase 4):** the `statbotics-staging-db`
+> Cloud SQL instance, the `db-password` secret, the `cloudsql.client` IAM grant,
+> the `statbotics-seed` job, the `statbotics-parquet-backfill` job, and two other
+> stale DB-era jobs. The api service no longer has a Cloud SQL socket,
+> `DATABASE_URL`, or `PGPASSWORD`. A final `pg_dump` is preserved in the private
+> bucket `gs://statbotics-staging-db-final-export/`. Evidence and preconditions:
+> [BILLING.md](../rig/BILLING.md#cloud-sql-decommissioned-2026-07-27--0281day).
 
-APIs enabled: sqladmin, run, cloudbuild, artifactregistry, secretmanager,
-cloudscheduler, storage, compute.
+Compute/service SA (`630091002690-compute@developer.gserviceaccount.com`)
+granted: `secretmanager.secretAccessor` on `tba-auth-key`, `storage.objectAdmin`
+on the bucket.
+
+APIs enabled: run, cloudbuild, artifactregistry, secretmanager,
+cloudscheduler, storage, compute. (`sqladmin` is left enabled but unused.)
 
 ---
 
@@ -386,37 +390,29 @@ Manual checks (all pass):
 
 ## Monthly cost estimate (facts; no time estimates)
 
-Budget is $25/mo. Dominated by Cloud SQL; everything else is near-zero because
+> **Superseded — this table predates the 2026-07-27 decommission.** The two
+> Cloud SQL rows below (~$8.60/mo, then the single largest line) are gone, along
+> with the seed job. For measured actuals and the current run rate, use
+> [BILLING.md](../rig/BILLING.md), which is the live cost document.
+
+Budget is $25/mo. Everything except the deleted database is near-zero because
 Cloud Run runs at min-instances=0 (no idle charge).
 
 | Resource | Basis | Est. $/mo |
 |----------|-------|-----------|
-| Cloud SQL `db-f1-micro` | ~$0.0105/hr shared-core, always-on | ~$7.70 |
-| Cloud SQL storage | 10 GB HDD @ ~$0.09/GB | ~$0.90 |
+| ~~Cloud SQL `db-f1-micro`~~ | ~~~$0.0105/hr shared-core, always-on~~ | ~~~$7.70~~ (deleted) |
+| ~~Cloud SQL storage~~ | ~~10 GB HDD @ ~$0.09/GB~~ | ~~~$0.90~~ (deleted) |
 | GCS storage | ~75 MB Standard @ $0.020/GB | <$0.01 |
 | GCS egress/ops | low staging traffic, browser reads | ~$0–2 |
 | Cloud Run (api+web) | min 0; billed only while serving; offseason cadence | ~$0–2 |
-| Cloud Run job (seed) | manual runs only | negligible |
 | Artifact Registry | ~1–2 GB images @ $0.10/GB | ~$0.20 |
-| Secret Manager | 2 secrets @ $0.06 + access | ~$0.15 |
+| Secret Manager | 1 secret @ $0.06 + access | ~$0.08 |
 | Cloud Scheduler | 2 jobs (3 free/mo) | $0 |
 | Cloudflare | existing zone; Workers free tier | $0 |
-| **Total** | | **~$10–13/mo** |
+| **Total (as estimated then)** | | **~$10–13/mo** |
 
-**Near-zero-idle option (documented, not built):** the only always-on cost is
-Cloud SQL. A pair of Cloud Scheduler jobs can stop/start the instance around the
-hourly update window to cut it toward $0:
-
-```
-# stop nightly / when idle
-gcloud sql instances patch statbotics-staging-db --activation-policy=NEVER --project=statbotics-staging
-# start before the update
-gcloud sql instances patch statbotics-staging-db --activation-policy=ALWAYS --project=statbotics-staging
-```
-
-(Storage is still billed while stopped; compute is not. Requires the update
-scheduler and start job to be sequenced. Left as an option to keep staging always
-queryable.)
+With the database gone there is no always-on component left: every remaining
+line is usage-billed or free-tier.
 
 ---
 
@@ -424,20 +420,17 @@ queryable.)
 
 ```bash
 P=statbotics-staging; R=us-central1
-# Cloud Run services + job
+# Cloud Run services
 gcloud --project=$P run services delete statbotics-api  --region=$R --quiet
 gcloud --project=$P run services delete statbotics-web  --region=$R --quiet
-gcloud --project=$P run jobs     delete statbotics-seed --region=$R --quiet
 # Scheduler
 gcloud --project=$P scheduler jobs delete statbotics-update --location=$R --quiet
 gcloud --project=$P scheduler jobs delete statbotics-gc     --location=$R --quiet
-# Cloud SQL (irreversible — drops all data)
-gcloud --project=$P sql instances delete statbotics-staging-db --quiet
-# GCS bucket (recursive)
+# GCS buckets (recursive) — the second holds the final pre-decommission DB dump
 gcloud --project=$P storage rm --recursive gs://statbotics-staging-site
+gcloud --project=$P storage rm --recursive gs://statbotics-staging-db-final-export
 # Secrets
 gcloud --project=$P secrets delete tba-auth-key --quiet
-gcloud --project=$P secrets delete db-password  --quiet
 # Artifact Registry (removes both images)
 gcloud --project=$P artifacts repositories delete statbotics --location=$R --quiet
 # Cloudflare (needs the token from ~/iterativerefinement_secret.txt; zone id via API):

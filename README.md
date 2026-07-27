@@ -16,7 +16,7 @@ The Expected Points Added (EPA) model builds upon the Elo rating system, but tra
 
 ## Server
 
-A FastAPI Python server integrates with The Blue Alliance (TBA) to compute, store, and serve EPA ratings. Seven SQL tables are created to aggregate results: `Teams`, `Years`, `TeamYears`, `Events`, `TeamEvents`, `Matches`, and `TeamMatches` (on CockroachDB). An internal API serves the frontend, while the REST API and Python API are made available for public use. The REST API docs is accessible [here](https://www.statbotics.io/api/rest).
+A FastAPI Python server integrates with The Blue Alliance (TBA) to compute, store, and serve EPA ratings. Results are aggregated into six entity tables — `Teams`, `Years`, `TeamYears`, `Events`, `TeamEvents`, and `Matches` — persisted as Parquet files in Google Cloud Storage and queried with DuckDB. An internal API serves the frontend, while the REST API and Python API are made available for public use. The REST API docs is accessible [here](https://www.statbotics.io/api/rest).
 
 ## Python API
 

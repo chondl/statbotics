@@ -1,6 +1,6 @@
-# Staging Cloud Run image for the statbotics backend (single service, all routes).
-# Prod uses App Engine (deploy/*.yaml) and ignores this file; it exists for the
-# staging deploy only.
+# Cloud Run image for the statbotics backend (single service, all routes).
+# This is what the mirror runs. The leftover App Engine YAML in deploy/ belongs
+# to the upstream split-service layout and is unused on this branch.
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
