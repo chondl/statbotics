@@ -32,9 +32,22 @@ see [`docs/superpowers/rig/DATA-REFRESH.md`](docs/superpowers/rig/DATA-REFRESH.m
 > the source of truth. Re-deriving these from scratch has burned time before;
 > the docs exist so you don't.
 
+> **`make ship` is the ONLY way to deploy. Every deploy is identical.** Never
+> `gcloud builds submit` / `gcloud run deploy` by hand, and never build or roll
+> a single service because "only the backend changed" — `make ship` always
+> builds both images and rolls both services. The component targets
+> (`build-api`, `deploy-api`, …) are guarded and will refuse to run outside
+> `make ship`; a deliberate partial deploy requires an explicit
+> `ALLOW_PARTIAL=1` and a reason. Do not reason your way to a shortcut because
+> a rebuild looks redundant — that judgment call is exactly what this rule
+> removes. Rationale in DEPLOY.md §1.
+
 - **Typical workflow is autonomous:** build the feature, deploy it, and verify it
   in production **without asking the user for permission**. Shipping to the mirror
   is expected, not an escalation.
+- **Merge your own PRs.** Do not wait for the user to review or merge. Open the
+  PR, verify it, merge it (`gh pr merge <n> --repo chondl/statbotics --merge
+  --delete-branch`), then pull the primary checkout so it does not drift.
 - **You own correctness in production.** After deploying, adequately test the
   feature against the live mirror (API + a real browser load where relevant) —
   deploying the revision is not "done"; observing the feature work is.

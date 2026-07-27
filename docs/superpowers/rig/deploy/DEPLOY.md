@@ -29,14 +29,44 @@ Build the feature, deploy it, and verify it in production **without pausing for
 permission** — that is the expected loop for this mirror. The agent owns
 correctness: adequately test in production before calling it done.
 
+### There is exactly one way to deploy
+
 ```
-make ship        # build both images + roll both services (image-only, preserves config)
+make ship        # build BOTH images + roll BOTH services
 ```
 
-`make ship` = `build` (Cloud Build → Artifact Registry) + `deploy` (image-only
-`gcloud run services update`, which **preserves** each service's env, secrets,
-CPU/memory). Never hand-set env vars on a redeploy unless you mean to change
-them — the image-only update is deliberate.
+**That is the only sanctioned deploy command.** Not `gcloud builds submit`, not
+`gcloud run deploy`, not `make deploy-api` because "only the backend changed".
+The component targets (`build`, `build-api`, `build-web`, `deploy`,
+`deploy-api`, `deploy-web`) are **guarded** and will refuse to run unless they
+were reached through `make ship`:
+
+```
+$ make deploy-api
+ERROR: 'deploy-api' is a PARTIAL deploy step — use 'make ship'.
+```
+
+Deliberate partial deploys must opt in and be justified:
+`make deploy-api ALLOW_PARTIAL=1`.
+
+**Why this is a rule rather than a preference.** Three failure modes, all of
+which have real precedent in this project's history:
+
+1. **Hand-rolled `gcloud run deploy` drops config.** `make deploy` uses an
+   *image-only* `gcloud run services update`, which **preserves** each
+   service's env vars, secrets, and CPU/memory. A typed-out `gcloud run deploy`
+   re-specifies the container and silently loses them.
+2. **Partial deploys drift production from branch history.** The invariant this
+   whole file defends is *production == branch history, always* (see
+   `check-deploy-src`). Half a revision pair breaks it.
+3. **"It didn't change, so I'll skip it" is a judgment call that can be wrong.**
+   Rebuilding an unchanged image costs a few cents and ~2 minutes. Being wrong
+   about what changed costs a stale production service and a confusing debug
+   session. The rule removes the judgment call.
+
+If you find yourself reasoning toward a shortcut — because the change is small,
+because a build seems redundant, because you already know which service is
+affected — that is precisely the situation this rule exists for. Run `make ship`.
 
 Prereqs: `gcloud` auth (chondl@gmail.com), ADC present, `~/thebluealliance_api_key.txt`,
 `~/statbotics_staging_secret.txt`, `~/iterativerefinement_secret.txt` (Cloudflare).
