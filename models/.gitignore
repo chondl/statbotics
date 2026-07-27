@@ -4,3 +4,8 @@ __pycache__
 cache
 
 *.csv
+
+# The README tells you to download the published Parquet tree into ./parquet
+# (~222 MB for 2002-2026). Keep it out of git.
+parquet
+manifest.json
