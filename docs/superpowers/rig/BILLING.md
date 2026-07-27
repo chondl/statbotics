@@ -15,31 +15,47 @@ a BigQuery billing export. We set up the latter:
 - **Exports enabled** (in the Billing Console → Export → BigQuery, by the account
   owner, 2026-07-19): **both** the **Standard usage cost** export and the
   **Detailed usage cost** export, targeting that dataset.
-- **Tables will appear circa 2026-07-20** — the export is not instantaneous;
-  first data lands a few hours to ~a day after enabling. Expected table names:
+- **Tables appeared 2026-07-19 09:55**, but stayed empty for ~36 h. Table names:
   - Standard: `billing_export.gcp_billing_export_v1_01DAA6_73BA7B_54EFE1`
   - Detailed (resource-level): `billing_export.gcp_billing_export_resource_v1_01DAA6_73BA7B_54EFE1`
-- **Not retroactive.** The export only captures costs **from enablement forward**
-  (2026-07-19 on). For spend *before* that (the first ~week), use the Billing
-  Console → Reports, filtered to project `statbotics-staging`.
+- **It WAS retroactive** — correcting an earlier note here. Once rows landed,
+  the standard export carried usage back to **2026-07-10**, the project's first
+  day, not just from the 2026-07-19 enablement date. There is no gap needing
+  the Console.
 
-### Query to run once data is flowing
+### Reading it: `make bill`
 
-Net spend (gross + credits) per service:
+Don't hand-roll the SQL — the wrapper (deferred in the first draft, added
+2026-07-27) lives in [deploy/Makefile](deploy/Makefile):
 
-```sql
-SELECT
-  service.description AS service,
-  ROUND(SUM(cost), 2) AS gross,
-  ROUND(SUM((SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c)), 2) AS credits,
-  ROUND(SUM(cost) + SUM((SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c)), 2) AS net
-FROM `statbotics-staging.billing_export.gcp_billing_export_v1_01DAA6_73BA7B_54EFE1`
-GROUP BY service
-ORDER BY net DESC;
+```
+make bill                 # per-day gross / free_tier / trial_credit / credits / net
+make bill DAYS=90         # widen the window (default 30)
+make bill-services        # gross per service over the window
 ```
 
-Run with `bq query --use_legacy_sql=false '<sql>'`. A `make bill` wrapper was
-**deliberately deferred** (decide later).
+Both are one physical line of SQL on purpose: macOS ships GNU Make 3.81, where
+the `.ONESHELL:` at the top of that Makefile is **silently ignored** (it landed
+in 3.82), so a multi-line quoted recipe dies with ``unexpected EOF while
+looking for matching `'``.
+
+### The two credit types, and why they are split
+
+`credits` is a repeated field; the export uses **two** types here, and they
+expire on completely different terms:
+
+| `credits.type` | `credits.name` | What it is |
+|---|---|---|
+| `DISCOUNT` | `CPU Allocation Time`, `Memory Allocation Time` | The Cloud Run **free tier**. Renews monthly, permanent. |
+| `PROMOTION` | `FreeTrialUpgrade:CreditId-FreeTrial:…` | The one-time **free-trial** credit. Finite. |
+
+**Note there is no `FREE_TIER` credit type** — an earlier draft of this doc said
+to look for one, and a query filtering on it returns nothing. The free tier
+arrives as `DISCOUNT`.
+
+This split is the whole point of `make bill`: the `gross` column is what the
+mirror **would** cost with no credits at all, and when the `PROMOTION` balance
+runs out that column becomes the actual invoice.
 
 ## Cost structure (reference)
 
@@ -60,10 +76,12 @@ billed only for active time.
 
 ## Provisioned resources & rough spend to date
 
-Resources (as of 2026-07-19):
+Resources (as of 2026-07-19 — **historical**; Cloud SQL was deleted 2026-07-27,
+see [Cloud SQL decommissioned](#cloud-sql-decommissioned-2026-07-27--0281day)):
 
 - **Cloud SQL** `db-f1-micro` + 10 GB PD_HDD — created 2026-07-10, **always on**
-  (the only non-scale-to-zero piece). ~$9/mo run-rate. This is the dominant cost.
+  (the only non-scale-to-zero piece). ~$9/mo run-rate; the dominant cost until
+  it was decommissioned.
 - **Cloud Run** `statbotics-api` (2 vCPU / 8 GiB, min 0 / max 2) and
   `statbotics-web` (1 vCPU / 1 GiB, min 0 / max 2) — `minScale=0`, but see
   [Instances rarely scale to zero](#instances-rarely-scale-to-zero-and-that-is-fine).
@@ -83,10 +101,94 @@ figures from the export / Console:
 | Artifact Registry | ~$0.10 | Image storage |
 | **Total** | **≈ $3–5** | Well under the $25 cap |
 
-Bottom line: **Cloud SQL is the only meaningful recurring cost** (~$9/mo);
-everything else is near-free because Cloud Run scales to zero and the compute
-fits the free tier. One-time bumps were the historical backfills (GCS write ops)
-and image rebuilds/reprocesses.
+Bottom line at the time: **Cloud SQL was the only meaningful recurring cost**
+(~$9/mo); everything else is near-free because Cloud Run scales to zero and the
+compute fits the free tier. One-time bumps were the historical backfills (GCS
+write ops) and image rebuilds/reprocesses. **With Cloud SQL gone there is no
+always-on line item left** — every remaining service is either scale-to-zero or
+per-use.
+
+## Per-day actuals, 2026-07-10 → 07-26 (from the export)
+
+Every column is dollars. `gross` = pre-credit cost; `net` = what is actually
+invoiced.
+
+| Day | Gross | Free tier | Trial credit | Total credits | Net |
+|---|---|---|---|---|---|
+| 2026-07-10 | 1.97 | −0.14 | −1.83 | −1.97 | 0.00 |
+| 2026-07-11 | 0.34 | −0.05 | −0.29 | −0.34 | 0.00 |
+| 2026-07-12 | 0.39 | −0.08 | −0.31 | −0.39 | 0.00 |
+| 2026-07-13 | 0.37 | −0.06 | −0.31 | −0.37 | 0.00 |
+| 2026-07-14 | 0.39 | −0.07 | −0.32 | −0.39 | 0.00 |
+| 2026-07-15 | 0.41 | −0.10 | −0.31 | −0.41 | 0.00 |
+| 2026-07-16 | 0.40 | −0.09 | −0.32 | −0.40 | 0.00 |
+| 2026-07-17 | 1.30 | −0.76 | −0.54 | −1.30 | 0.00 |
+| 2026-07-18 | 1.34 | −0.99 | −0.35 | −1.34 | 0.00 |
+| 2026-07-19 | 0.36 | −0.03 | −0.33 | −0.36 | 0.00 |
+| 2026-07-20 | 0.38 | −0.05 | −0.33 | −0.38 | 0.00 |
+| 2026-07-21 | 1.35 | −0.39 | −0.95 | −1.35 | 0.00 |
+| 2026-07-22 | 0.44 | −0.08 | −0.36 | −0.44 | 0.00 |
+| 2026-07-23 | 0.43 | −0.06 | −0.37 | −0.43 | 0.00 |
+| 2026-07-24 | 0.41 | −0.05 | −0.36 | −0.41 | 0.00 |
+| 2026-07-25 | 0.52 | −0.12 | −0.40 | −0.52 | 0.00 |
+| 2026-07-26 † | 1.01 | −0.28 | −0.73 | −1.01 | 0.00 |
+| **Total** | **11.81** | **−3.40** | **−8.42** | **−11.82** | **0.00** |
+
+† Partial. The last day is **always** partial — billing rows lag the export by
+a few hours, so never read the final row as a full day.
+
+**Steady-state gross was ~$0.59/day (~$18/mo)** — the mean of the 15 complete
+days 07-11 → 07-25, excluding the 07-10 stand-up day. All-in across the window
+it is $0.70/day (~$21/mo), which was brushing the $25/mo cap. **Net was $0
+every single day**: the free tier covers Cloud Run allocation time and the
+free-trial promotion absorbs the rest. $8.42 of trial credit burned in 17 days.
+
+Gross by service over the window: Cloud SQL $5.23 · Cloud Run $3.59 · Cloud
+Build $1.81 · Artifact Registry $0.71 · Cloud Storage $0.47 · all else $0.00.
+
+Shape of the spikes — none of them are audience-driven:
+
+- **07-17/18** — IRI weekend. Cloud Run $0.76 and $0.99 against a $0.06
+  quiet-day baseline. See [What actually drives cost](#what-actually-drives-cost-reprocessing-and-it-is-match-data-driven).
+- **07-21, 07-26** — Cloud Build $0.56 and $0.43: deploys, not data.
+- **Cloud SQL was a flat $0.281/day**, every day, forever — the only always-on,
+  never-discounted line, and ~48% of steady-state gross. That is what made it
+  worth deleting (below).
+
+## Cloud SQL decommissioned 2026-07-27 (−$0.281/day)
+
+DB retirement Phase 4. The instance, its `db-password` secret, the
+`cloudsql.client` IAM grant, the `statbotics-seed` DB-mode job, and three stale
+DB-era Cloud Run jobs are **deleted**. Expect steady-state gross to fall from
+~$0.59/day to **~$0.31/day (~$9.5/mo)**, and the mirror to sit well inside the
+cap on Cloud Run + Build + storage alone.
+
+Preconditions verified before deletion — all six, in this order:
+
+1. **Soak** — `DISABLE_DB=True` since revision `statbotics-api-00023`,
+   2026-07-21T16:07Z: **5 d 9 h**, against a 48 h bar.
+2. **No DB errors** in the api service logs across the entire soak.
+3. **No application connections** — `num_backends{database=statbotics3}` peaked
+   at 1 in only 10 of 60 sampled hours, irregularly. The hourly cron runs
+   24×/day, so an app that still connected would show up in nearly every hour;
+   the sporadic single connections are Cloud SQL's own agent.
+4. **Parquet complete** — 144 logical objects in the manifest = 24 years × 6
+   tables, matching the design's precondition exactly. (2021 is absent by
+   design: no standard FRC season.)
+5. **Smoke 9/9**, including the `norm_epa` canary, both before and after the
+   binding was removed.
+6. **Write path proven db-less** — a full `reset_curr_year` ran end to end
+   *after* the Cloud SQL binding, `DATABASE_URL`, and `PGPASSWORD` were stripped
+   from the service: TBA load → EPA → `Post Wins/EPA/District` → Write Storage →
+   Write Snapshot → `refresh_teams`, no errors.
+
+A final `pg_dump` is preserved at
+**`gs://statbotics-staging-db-final-export/statbotics3-final-2026-07-27.sql.gz`**
+(192 MiB, ~$0.004/mo). It is a **separate, private** bucket with
+public-access-prevention on — deliberately *not* `statbotics-staging-site`,
+which is world-readable (`allUsers: objectViewer`). Delete it whenever you are
+comfortable; the DB is fully reproducible from TBA via a db-less
+`reset_all_years` regardless.
 
 ## Measured actuals (2026-07-20)
 
@@ -114,9 +216,10 @@ cost money even when free-tier usage should zero it out.
 
 Measured July usage was **66,479 vCPU-s** and **259,295 GiB-s**, both inside the
 180,000 / 360,000 monthly free tier — so the $2.44 Cloud Run line is almost
-certainly ~$0 net. **Do not conclude the free tier is broken without turning the
-savings toggles on**, or without checking the `credits` array (credit type
-`FREE_TIER`) in the BigQuery export.
+certainly ~$0 net — the export later confirmed it. **Do not conclude the free
+tier is broken without turning the savings toggles on**, or without checking the
+`credits` array in the BigQuery export — where the free tier is credit type
+**`DISCOUNT`**, not `FREE_TIER`. `make bill` breaks it out for you.
 
 ### Instances rarely scale to zero, and that is fine
 

@@ -3,8 +3,8 @@
 This file provides guidance to Claude Code (claude.ai/code) when working in the `backend/` directory.
 
 > **This is the `cph-staging` branch — what runs in production (the mirror).**
-> Its architecture differs from the `cph-master`/upstream line: Postgres/Cloud SQL
-> + DuckDB-over-Parquet serving in a single Cloud Run container, plus offseason
+> Its architecture differs from the `cph-master`/upstream line: **no database** —
+> DuckDB-over-Parquet serving in a single Cloud Run container, plus offseason
 > support and a read-triggered freshness ping. The **Router Structure** and
 > **Database** sections below still describe the older `cph-master` architecture
 > (CockroachDB, split services) and are being reconciled — for how and *when*
@@ -80,11 +80,11 @@ When adding a new season, add a new entry to `all_keys` and a new `clean_breakdo
 
 ## Database (`src/db/`)
 
-> **DB retirement (this branch):** production serves and persists via
-> DuckDB-over-Parquet + GCS; with `DISABLE_DB=True` (the Phase 2 flip) the
-> engine is never constructed and `src/db/read`/`src/db/write` are dormant —
-> Cloud SQL stays bound only as the rollback path during the 48 h soak, then
-> is decommissioned (Phase 4). **`src/db/models/` stays load-bearing db-less**:
+> **DB retirement (this branch): COMPLETE as of 2026-07-27.** Production serves
+> and persists via DuckDB-over-Parquet + GCS. `DISABLE_DB=True` is permanent and
+> the Cloud SQL instance is deleted, so the engine is never constructed and
+> `src/db/read`/`src/db/write` are dead code awaiting removal (Phase 4 step 3 —
+> not yet done). **`src/db/models/` stays load-bearing db-less**:
 > the Parquet, snapshot, and DuckDB schemas all introspect the attrs/ORM
 > classes. The description below is the legacy `cph-master` architecture.
 

@@ -123,6 +123,18 @@ Make the pipeline the owner of Team state, GCS the store:
 ### Phase 4 — decommission and delete (after 48 h of db-less soak; user
 decision 2026-07-21)
 
+> **Status 2026-07-27: steps 1, 2, and 4 DONE. Step 3 (code deletion) NOT
+> done.** The instance, `db-password`, the `cloudsql.client` grant, the
+> `statbotics-seed` DB-mode job, and three stale DB-era jobs are deleted; the
+> final `pg_dump` is at `gs://statbotics-staging-db-final-export/` (private);
+> Makefile/`deploy.sh`/docs are swept and `flip-db`/`flip-dbless` are gone.
+> Soak was 5 d 9 h (flip 07-21T16:07Z → delete 07-27T01:2x Z). Verification
+> evidence: [BILLING.md](../rig/BILLING.md#cloud-sql-decommissioned-2026-07-27--0281day).
+> **Remaining:** step 3 — `src/db/read`, `src/db/write`, `src/db/functions`,
+> `src/db/transaction.py`, the engine/Session in `src/db/main.py`, `CRDB_*`/
+> `DATABASE_URL` constants, `root.crt`, `/info`'s `conn_str`, and the
+> `psycopg2`/`sqlalchemy-cockroachdb` deps are now dead code, still shipped.
+
 1. Final safety export: `pg_dump` to `gs://…/final-db-export/` before any
    deletion.
 2. Infra: remove Cloud SQL bindings + `PGPASSWORD` from all Makefile

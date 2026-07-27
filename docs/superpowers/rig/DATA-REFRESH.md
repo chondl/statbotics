@@ -35,9 +35,9 @@ Every trigger runs the same function: `process_year()` in
 5. If `year == CURR_YEAR` — publish compressed blobs to GCS and fold current-year
    Parquet into a single `manifest.json` write; historical years publish their
    Parquet + `hist/` site blobs instead. GCS is the store.
-6. `write_objs_db` — DB mode only (`DISABLE_DB=False`): additionally write
-   Postgres. Skipped entirely after the db-less flip; Cloud SQL then sits in
-   soak as the rollback path until Phase 4 decommissions it.
+6. `write_objs_db` — **dead path.** It only ran with `DISABLE_DB=False`, and
+   since Phase 4 (2026-07-27) there is no database: the Cloud SQL instance is
+   deleted. GCS is the only store.
 
 **EPA is a full-season replay every cycle — O(season), not incremental.** The
 `partial` and `tba_partial` flags change only the *DB read strategy* and the
@@ -163,6 +163,6 @@ automatic:
 
 `cph-master` (the minimal upstream-fix line) describes an **older architecture**:
 CockroachDB, three separate App Engine services, no ping. **Production runs
-`cph-staging`**: Postgres/Cloud SQL + DuckDB-over-Parquet serving in one Cloud Run
-container, the ping, and the offseason freeze. When reasoning about live
+`cph-staging`**: no database at all — DuckDB-over-Parquet serving in one Cloud
+Run container, the ping, and the offseason freeze. When reasoning about live
 behavior, read `cph-staging`. See [STAGING.md](STAGING.md) and [DEPLOY.md](deploy/DEPLOY.md).

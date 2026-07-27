@@ -34,13 +34,12 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
 
 - Project: `statbotics-staging` (always pass `--project=statbotics-staging`).
 - Region: `us-central1`.
-- Cloud SQL: `statbotics-staging-db` (Postgres 15, db-f1-micro); conn name
-  `statbotics-staging:us-central1:statbotics-staging-db`; db `statbotics3`, user
-  `statbotics`.
+- Cloud SQL: **none** — deleted 2026-07-27 (DB retirement Phase 4). Final dump
+  at `gs://statbotics-staging-db-final-export/` (private).
 - Bucket: `statbotics-staging-site` (public read).
 - Cloud Run: `statbotics-api` (2 vCPU / 8Gi), `statbotics-web`; jobs
-  `statbotics-seed` (legacy DB seed), transient `statbotics-reprocess-{year}`
-  jobs from `make reprocess-year`.
+  `statbotics-seed` (db-less stand-up, created on demand by `deploy.sh seed`),
+  transient `statbotics-reprocess-{year}` jobs from `make reprocess-year`.
 - Scheduler: `statbotics-update` (hourly), `statbotics-gc` (daily 04:30 UTC, v2/ GC).
   How the hourly cron + read-triggered ping drive EPA recompute:
   [DATA-REFRESH.md](DATA-REFRESH.md).
@@ -48,22 +47,22 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
 ## Full-stack env vars (backend `statbotics-api`)
 
 - `API_BACKEND=duckdb` — `/v3` public API serves from DuckDB-over-Parquet
-  (`src/api/backend.py` imports read fns from `src.db_duckdb`). Unset ⇒ relational
-  DB serving. **This is the deployed default.**
+  (`src/api/backend.py` imports read fns from `src.db_duckdb`). **This is the
+  deployed default and now the only option** — leaving it unset would select
+  relational-DB serving against a database that no longer exists.
 - Snapshot + Parquet publishing are **on by default in the code** (no flag). Each
   cycle writes `state/snapshot.{year}` and folds current-year Parquet into the
   single manifest write.
-- `DISABLE_DB` — **the deployed production mode since 2026-07-21** (`make
-  flip-dbless`; rollback `make flip-db`; Cloud SQL retained during the 48 h
-  soak, deleted in Phase 4). `DISABLE_DB=True`
-  makes the backend construct no engine/session, skip all DB writes, and serve
-  `/v3`+`/v3/site` purely from Parquet + the snapshot. To flip staging to a db-less
-  demo: `gcloud --project=statbotics-staging run services update statbotics-api
-  --region=us-central1 --update-env-vars=DISABLE_DB=True` (requires the full
-  historical Parquet backfill already done — it is — else EPA seeds regress to the
-  rookie mean and `/info` shows `DB_LESS_SEED_INCOMPLETE: true`). Revert:
-  `--remove-env-vars=DISABLE_DB`. Staging is deliberately deployed **DB-on** so the
-  DB remains the queryable fallback.
+- `DISABLE_DB=True` — **the deployed production mode since 2026-07-21T16:07Z**,
+  and since Phase 4 (2026-07-27) **permanent**: the Cloud SQL instance is gone,
+  so this is no longer a flip with a rollback but simply how the service runs.
+  It is baked into `deploy.sh`'s `step_backend`, and the `make flip-dbless` /
+  `make flip-db` targets have been removed. The backend constructs no
+  engine/session, skips all DB writes, and serves `/v3`+`/v3/site` purely from
+  Parquet + the snapshot. **Never set `DISABLE_DB=False`** — it would take
+  production down. Health signal: `/info` shows `DB_LESS_SEED_INCOMPLETE: false`
+  when the historical Parquet backfill is intact (it is: 144 objects, 24 years ×
+  6 tables).
 
 ## Historical Parquet + hist blobs (pipeline-owned)
 
@@ -80,9 +79,9 @@ db-less `reset_all_years` — see
 ## Secrets
 
 - Local: `/Users/chondl/statbotics_staging_secret.txt` (chmod 600, KEY=VALUE).
-- Secret Manager: `tba-auth-key`, `db-password`.
-- The backend gets `DATABASE_URL` (no password) + `PGPASSWORD` (from
-  `db-password`) + `TBA_AUTH_KEY` (from `tba-auth-key`). Never echo these.
+- Secret Manager: `tba-auth-key`. (`db-password` was deleted with Cloud SQL on
+  2026-07-27; the local secret file's `CLOUDSQL_*` lines are now dead entries.)
+- The backend gets `TBA_AUTH_KEY` (from `tba-auth-key`). Never echo it.
 
 ## Common operations
 
