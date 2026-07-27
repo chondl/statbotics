@@ -4,13 +4,11 @@ import time
 import requests
 from fastapi import APIRouter, BackgroundTasks, Response
 
-from src.constants import BACKEND_URL, CURR_YEAR, DISABLE_DB
+from src.constants import BACKEND_URL, CURR_YEAR
 from src.data import main as data_main
 from src.data.main import refresh_teams, reset_all_years, update_curr_year
 from src.data.sweep import revalidate_tba
 from src.data.tba import check_year_partial as check_year_partial_tba
-from src.db.read import get_etags as get_etags_db
-from src.db.read import get_events as get_events_db
 from src.google.snapshot import read_snapshot
 from src.google.storage import GC_GRACE_HOURS, gc_versioned_blobs
 
@@ -82,24 +80,20 @@ def update_curr_year_background():
 
 @site_router.get("/update_curr_year")
 async def update_curr_year_site_endpoint(background_tasks: BackgroundTasks):
-    if DISABLE_DB:
-        loaded = read_snapshot(CURR_YEAR)
-        if loaded is None:
-            # Snapshot unreadable (read_snapshot never raises): assume no new
-            # data and skip. Probing TBA with an empty etag baseline would
-            # always report "new data" and trigger a partial cycle that the
-            # pipeline's snapshot-miss guard (_update_curr_year) would skip
-            # anyway — so don't spend the TBA calls or the cycle. Surface the
-            # degraded state: a persistent snapshot failure (e.g. fingerprint
-            # mismatch after a model change) would otherwise starve updates
-            # silently behind an ordinary-looking "skipped".
-            data_main.db_less_partial_skipped = True
-            return {"status": "skipped", "reason": "snapshot-unreadable"}
-        event_objs = list(loaded[0][2].values())
-        etags = list(loaded[0][5].values())
-    else:
-        event_objs = get_events_db(year=CURR_YEAR)
-        etags = get_etags_db(CURR_YEAR)
+    loaded = read_snapshot(CURR_YEAR)
+    if loaded is None:
+        # Snapshot unreadable (read_snapshot never raises): assume no new
+        # data and skip. Probing TBA with an empty etag baseline would
+        # always report "new data" and trigger a partial cycle that the
+        # pipeline's snapshot-miss guard (_update_curr_year) would skip
+        # anyway — so don't spend the TBA calls or the cycle. Surface the
+        # degraded state: a persistent snapshot failure (e.g. fingerprint
+        # mismatch after a model change) would otherwise starve updates
+        # silently behind an ordinary-looking "skipped".
+        data_main.db_less_partial_skipped = True
+        return {"status": "skipped", "reason": "snapshot-unreadable"}
+    event_objs = list(loaded[0][2].values())
+    etags = list(loaded[0][5].values())
     is_new_data = check_year_partial_tba(CURR_YEAR, event_objs, etags)
     if not is_new_data:
         return {"status": "skipped"}

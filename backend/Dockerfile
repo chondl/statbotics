@@ -8,13 +8,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# requirements.txt pins source psycopg2==2.9.10, which needs a full libpq/compile
-# toolchain. psycopg2-binary is the identical module with a bundled libpq (the
-# same swap the local rig uses). Keep the tracked requirements.txt pristine by
-# rewriting the pin at build time rather than editing the file.
+# DB retirement Phase 4: there is no relational database, so there is no
+# psycopg2 pin to rewrite here any more (the build used to swap the source
+# psycopg2 pin for psycopg2-binary to avoid needing a libpq/compile toolchain).
 COPY requirements.txt ./
-RUN sed 's/^psycopg2==/psycopg2-binary==/' requirements.txt > requirements.staging.txt \
-    && pip install -r requirements.staging.txt
+RUN pip install -r requirements.txt
 
 COPY . .
 

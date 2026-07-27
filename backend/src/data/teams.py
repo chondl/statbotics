@@ -15,9 +15,10 @@ from src.db.models import Team, TeamYear
 def derive_team_districts(
     teams: List[Team], all_team_years: Dict[int, Dict[int, TeamYear]]
 ) -> List[Team]:
-    """Equivalent of update_team_districts (src/db/functions/update_teams.py).
+    """Replacement for the retired SQL update_team_districts (deleted with the
+    rest of src/db/functions in DB retirement Phase 4).
 
-    The SQL sets Team.district to a scalar subquery over the team's TeamYears
+    The SQL set Team.district to a scalar subquery over the team's TeamYears
     ORDER BY year DESC LIMIT 1 — i.e. the most recent TeamYear's district,
     even when that value is null, and null when the team has no TeamYears at
     all. Replicated exactly: "latest non-null district" would NOT match.
@@ -37,9 +38,10 @@ def derive_team_districts(
 
 
 def prune_teams(teams: List[Team], event_teams: Set[int]) -> List[Team]:
-    """Publish-time equivalent of remove_teams_with_no_events' Team deletion
-    (src/db/functions/remove_teams_no_events.py): drop teams with zero
-    TeamEvents across all years whose rookie_year is a known past year.
+    """Publish-time replacement for the retired remove_teams_with_no_events'
+    Team deletion (deleted with the rest of src/db/functions in DB retirement
+    Phase 4): drop teams with zero TeamEvents across all years whose
+    rookie_year is a known past year.
 
     Matching the SQL predicate `team NOT IN (event teams) AND rookie_year <
     CURR_YEAR`: teams with rookie_year NULL (unknown comparison) or >=
