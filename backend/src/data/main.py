@@ -4,29 +4,21 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
-from src.constants import CURR_YEAR, DISABLE_DB, DISABLE_GCS
+from src.constants import CURR_YEAR, DISABLE_GCS
 from src.data.avg import process_year as process_year_avg
 from src.data.backend import get_team_event_teams as get_team_event_teams_db
-from src.data.backend import get_team_events as get_team_events_db
 from src.data.backend import get_team_years as get_team_years_db
 from src.data.backend import get_teams as get_teams_db
 from src.data.epa.main import post_process as post_process_epa
 from src.data.epa.main import process_year as process_year_epa
 from src.data.tba import load_teams as load_teams_tba
-from src.data.tba import post_process as post_process_tba
 from src.data.tba import process_year as process_year_tba
 from src.data.teams import derive_team_districts, prune_teams
 from src.data.utils import Timer, create_objs, objs_type
-from src.data.utils import read_objs as read_objs_db
-from src.data.utils import write_objs as write_objs_db
 from src.data.wins import post_process as post_process_wins
 from src.data.wins import process_year as process_year_wins
 from src.data.wins import winrate
-from src.db.main import clean_db
 from src.db.models import Team, TeamYear
-from src.db.write.main import update_team_events as update_team_events_db
-from src.db.write.main import update_team_years as update_team_years_db
-from src.db.write.main import update_teams as update_teams_db
 from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import publish_team_artifacts, write_hist_blobs
@@ -85,19 +77,18 @@ def process_year(
     orig_objs = deepcopy(objs)
     # Team-blob change-gate baseline: captured at cycle start, before anything
     # (process_year_tba today, or a future post-post_process teams publish)
-    # mutates the teams list, so write_objs compares against true cycle-start
-    # team rows. Partial cycles only, mirroring orig_objs below.
+    # mutates the teams list, so write_objs_storage compares against true
+    # cycle-start team rows. Partial cycles only, mirroring orig_objs below.
     #
     # team_baseline_valid=False marks a partial cycle whose teams list did NOT
-    # come from the snapshot the published blobs were rendered from (snapshot
-    # read failed; teams reloaded from the DB/TBA). Those rows may already
-    # carry mutations (refresh_teams, post_process) made since the blobs were
-    # last rendered, so a baseline deepcopied from them would wrongly report
-    # "unchanged" for stale blobs. Pass orig_teams=None so write_objs renders
-    # every team. The EVENT gate keeps its orig_objs baseline on that path:
-    # fallback orig_objs comes from read_objs_db, the same cycle-start source
-    # the DB-mode event gate always used pre-snapshot, so it is valid — only
-    # team rows are mutated outside the objs write path.
+    # come from the snapshot the published blobs were rendered from. Those rows
+    # may already carry mutations (refresh_teams, post_process) made since the
+    # blobs were last rendered, so a baseline deepcopied from them would
+    # wrongly report "unchanged" for stale blobs; orig_teams=None makes
+    # write_objs_storage render every team. Defence in depth since Phase 4: a
+    # partial cycle that cannot read the snapshot now returns early from
+    # _update_curr_year (there is no DB to reload from), so partial always
+    # implies a valid baseline in practice.
     orig_teams = deepcopy(teams) if partial and team_baseline_valid else None
     if all_team_years is None:
         all_team_years = defaultdict(dict)
@@ -107,7 +98,7 @@ def process_year(
                     all_team_years[ty.year][ty.team] = ty
         except Exception:
             traceback.print_exc()
-        if DISABLE_DB and year_num > 2002 and not all_team_years:
+        if year_num > 2002 and not all_team_years:
             global db_less_seed_incomplete
             db_less_seed_incomplete = True
             print(
@@ -131,45 +122,31 @@ def process_year(
     objs = process_year_epa(objs, all_team_years)
     timer.print(str(year_num) + " EPA")
 
-    if curr_year_gcs:
-        # Partial cycles publish here, exactly as before (byte-identical:
-        # same args, same order). Full cycles DEFER the GCS publish (snapshot,
-        # Parquet, site blobs) to publish_curr_year(), which the caller runs
-        # AFTER post_process so post-processed Team fields — career records,
-        # norm_epa*, active, last_active_year, district — reach GCS (DB
-        # retirement Phase 1 item 1). The team-blob change gate is unaffected:
-        # its orig_teams baseline exists only on partial cycles (captured at
-        # cycle start above); full cycles publish with orig=None → render-all.
-        if partial:
-            # INVARIANT: blobs/manifest first, snapshot last (same
-            # gate-baseline rule as refresh_teams and publish_curr_year).
-            # The snapshot is the change-gate baseline the NEXT partial
-            # cycle diffs against, so it may only record state whose blobs
-            # are already published. A storage failure leaves the snapshot
-            # behind — the next cycle re-diffs against the old baseline and
-            # over-renders (safe). Snapshot-first would leave the baseline
-            # ahead of unpublished blobs on failure, and the gate would
-            # mask them as "unchanged" forever. write_snapshot is a pure
-            # serialize-and-upload of the in-memory objs/teams, and
-            # write_objs_storage mutates neither, so the swap has no data
-            # dependency in either direction.
-            parquet_uploads = build_parquet_uploads(year_num, objs, teams)
-            write_objs_storage(objs, orig_objs, teams, parquet_uploads, orig_teams)
-            timer.print(str(year_num) + " Write Storage")
+    # Partial cycles publish here. Full cycles DEFER the GCS publish (snapshot,
+    # Parquet, site blobs) to publish_curr_year(), which the caller runs AFTER
+    # post_process so post-processed Team fields — career records, norm_epa*,
+    # active, last_active_year, district — reach GCS (DB retirement Phase 1
+    # item 1). The team-blob change gate is unaffected: its orig_teams baseline
+    # exists only on partial cycles (captured at cycle start above); full
+    # cycles publish with orig=None → render-all.
+    if curr_year_gcs and partial:
+        # INVARIANT: blobs/manifest first, snapshot last (same gate-baseline
+        # rule as refresh_teams and publish_curr_year). The snapshot is the
+        # change-gate baseline the NEXT partial cycle diffs against, so it may
+        # only record state whose blobs are already published. A storage
+        # failure leaves the snapshot behind — the next cycle re-diffs against
+        # the old baseline and over-renders (safe). Snapshot-first would leave
+        # the baseline ahead of unpublished blobs on failure, and the gate
+        # would mask them as "unchanged" forever. write_snapshot is a pure
+        # serialize-and-upload of the in-memory objs/teams, and
+        # write_objs_storage mutates neither, so the swap has no data
+        # dependency in either direction.
+        parquet_uploads = build_parquet_uploads(year_num, objs, teams)
+        write_objs_storage(objs, orig_objs, teams, parquet_uploads, orig_teams)
+        timer.print(str(year_num) + " Write Storage")
 
-            write_snapshot(year_num, objs, teams)
-            timer.print(str(year_num) + " Write Snapshot")
-
-        if not DISABLE_DB:
-            try:
-                db_orig = read_objs_db(year_num) if partial else None
-                write_objs_db(year_num, objs, db_orig, not partial)
-            except Exception:
-                traceback.print_exc()
-            timer.print(str(year_num) + " Write DB")
-    elif not DISABLE_DB:
-        write_objs_db(year_num, objs, orig_objs if partial else None, not partial)
-        timer.print(str(year_num) + " Write DB")
+        write_snapshot(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Snapshot")
 
     # Current-year parquet is folded into the site manifest above; historical years
     # publish parquet on their own manifest write (independent of the DB, so db-less
@@ -209,19 +186,10 @@ def post_process(
     teams = post_process_epa(teams, all_team_years)
     timer.print("Post EPA")
 
-    # In-pipeline district derivation (DB retirement Phase 1 item 2): runs in
-    # both modes so the published teams table no longer depends on the DB-side
-    # update_team_districts (which still runs below in DB mode and computes
-    # the same values).
+    # In-pipeline district derivation (DB retirement Phase 1 item 2): replaced
+    # the DB-side update_team_districts, deleted in Phase 4.
     teams = derive_team_districts(teams, all_team_years)
     timer.print("Post District")
-
-    if not DISABLE_DB:
-        update_teams_db(teams)
-        timer.print("Update DB")
-
-        post_process_tba()  # updates DB directly
-        timer.print("Post TBA")
 
     return teams
 
@@ -238,9 +206,9 @@ def publish_curr_year(objs: objs_type, teams: List[Team]) -> List[Team]:
 
     Also applies the publish-time no-event prune (Phase 1 item 3): teams with
     zero TeamEvents across all years are excluded from teams/all and the
-    teams Parquet, mirroring the DB-side remove_teams_with_no_events (which
-    still runs in DB mode via post_process_tba, on the same TeamEvent set —
-    stored years unioned with this cycle's in-memory team_events). If the
+    teams Parquet — the replacement for the DB-side
+    remove_teams_with_no_events (deleted in Phase 4), over the same TeamEvent
+    set (stored years unioned with this cycle's in-memory team_events). If the
     stored set cannot be read the prune is skipped for the cycle: publishing
     an unpruned list is recoverable, silently dropping teams is not.
 
@@ -285,10 +253,6 @@ def _reset_all_years():
 
     start_year = 2002
     end_year = CURR_YEAR
-
-    if not DISABLE_DB:
-        clean_db()
-        timer.print("Clean DB")
 
     teams = load_teams_tba(cache=True)
     timer.print("Load Teams")
@@ -340,39 +304,28 @@ def _update_curr_year(partial: bool, tba_partial: bool):
 
     global db_less_partial_skipped
     if objs is None or teams is None:
-        if DISABLE_DB:
-            if partial:
-                # INVARIANT (db-less): a partial cycle may only run from the
-                # snapshot. There is no other source of prior pipeline state
-                # — the fallback objs below are EMPTY (create_objs), and the
-                # TBA tier logic skips out-of-window completed events whose
-                # manifest validation is fresh, so a partial cycle seeded
-                # from empty objs would publish near-empty artifacts over
-                # the good snapshot/blobs/current-year Parquet. Skip the
-                # cycle entirely: process nothing, publish nothing. The next
-                # successful snapshot read (or an operator full reset)
-                # resumes normal operation.
-                db_less_partial_skipped = True
-                print(
-                    "ERROR: db-less partial cycle SKIPPED — snapshot "
-                    "unreadable, and running from empty objs would publish "
-                    "near-empty artifacts over good ones. Surfaced via /info "
-                    "DB_LESS_PARTIAL_SKIPPED."
-                )
-                return
-            teams = load_teams_tba(cache=True)
-            objs = create_objs(year)
-            timer.print("Load Teams (TBA)")
-        else:
-            teams = get_teams_db()
-            timer.print("Load Teams")
-            if partial:
-                objs = read_objs_db(year)
-                timer.print("Read Objs")
-            else:
-                objs = create_objs(year)
-                timer.print("Create Objs")
-    elif DISABLE_DB and partial:
+        if partial:
+            # INVARIANT (db-less): a partial cycle may only run from the
+            # snapshot. There is no other source of prior pipeline state —
+            # the fallback objs below are EMPTY (create_objs), and the TBA
+            # tier logic skips out-of-window completed events whose manifest
+            # validation is fresh, so a partial cycle seeded from empty objs
+            # would publish near-empty artifacts over the good
+            # snapshot/blobs/current-year Parquet. Skip the cycle entirely:
+            # process nothing, publish nothing. The next successful snapshot
+            # read (or an operator full reset) resumes normal operation.
+            db_less_partial_skipped = True
+            print(
+                "ERROR: db-less partial cycle SKIPPED — snapshot "
+                "unreadable, and running from empty objs would publish "
+                "near-empty artifacts over good ones. Surfaced via /info "
+                "DB_LESS_PARTIAL_SKIPPED."
+            )
+            return
+        teams = load_teams_tba(cache=True)
+        objs = create_objs(year)
+        timer.print("Load Teams (TBA)")
+    elif partial:
         # Snapshot readable again: normal partial operation resumes.
         db_less_partial_skipped = False
 
@@ -392,13 +345,10 @@ def _update_curr_year(partial: bool, tba_partial: bool):
     if not partial:
         # Full cycle: the current-year publish is deferred until after
         # post_process (Phase 1 item 1). Current-year TeamYears come from
-        # this cycle's in-memory objs — the DB round-trip the old flow relied
-        # on does not exist db-less because the publish that would persist
-        # them has not happened yet; in DB mode the rows are identical (they
-        # were just written from these very objects). Prior years come from
-        # the backend (DB or Parquet). If that read fails, skip post_process
-        # rather than publish half-computed career fields — and what happens
-        # next depends on the mode (see the invariant below).
+        # this cycle's in-memory objs — the publish that would persist them
+        # has not happened yet. Prior years come from the backend (Parquet
+        # via DuckDB). If that read fails, skip post_process rather than
+        # publish half-computed career fields (see the invariant below).
         all_team_years: Optional[Dict[int, Dict[int, TeamYear]]] = None
         try:
             prior_tys = get_team_years_db()
@@ -418,17 +368,14 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             teams = post_process(teams, all_team_years)
 
         global db_less_publish_skipped
-        if DISABLE_DB and prior_tys is None:
-            # INVARIANT (DB retirement Phase 1): db-less, a full cycle may
-            # only publish teams that went through post_process. Here the
-            # teams list is fresh from load_teams_tba — career records,
-            # norm_epa, active, last_active_year, district all empty — and
-            # publishing it would clobber good published blobs, the teams
-            # Parquet, AND the snapshot partial cycles resume from. Skip the
-            # publish; the next successful full cycle republishes everything.
-            # (DB mode publishes anyway: its teams came from the DB with
-            # post-processed fields already set — yesterday's values, not
-            # wrong ones — and reload fresh from the DB next cycle.)
+        if prior_tys is None:
+            # INVARIANT (DB retirement Phase 1): a full cycle may only publish
+            # teams that went through post_process. Here the teams list is
+            # fresh from load_teams_tba — career records, norm_epa, active,
+            # last_active_year, district all empty — and publishing it would
+            # clobber good published blobs, the teams Parquet, AND the
+            # snapshot partial cycles resume from. Skip the publish; the next
+            # successful full cycle republishes everything.
             db_less_publish_skipped = True
             print(
                 "ERROR: db-less full cycle SKIPPING publish_curr_year — teams "
@@ -446,16 +393,14 @@ def reprocess_year(year_num: int) -> None:
     """Full single-year historical reprocess — the one driver for both the
     daily TBA sweep (design §2.3) and the operator `reprocess-year` job in
     docs/superpowers/rig/deploy/Makefile (whose REPROCESS_DRIVER calls this
-    function directly). Works in both modes; needs no DB db-less:
+    function directly). Needs no DB:
 
     - process_year(partial=False, cache=True): re-ingests the year from the
       freshly revalidated pickles (zero further TBA traffic for validated
       paths), recomputes EPA with the prior-4-year team_years seeding read
-      inside process_year (all_team_years=None — DB, or Parquet via DuckDB
-      db-less), republishes the year's Parquet, emits its hist/ site blobs
-      from the pipeline objects (write_hist_blobs; write-once per
-      HIST_EPOCH), and in DB mode also rewrites the year's DB rows
-      (write_objs clean=True clears first).
+      inside process_year (all_team_years=None — Parquet via DuckDB),
+      republishes the year's Parquet, and emits its hist/ site blobs from the
+      pipeline objects (write_hist_blobs; write-once per HIST_EPOCH).
     - Chained full current-year re-render: team/{num} site blobs embed each
       team's full-history team_years and the team-blob change gate skips
       them on partial cycles, so a historical reprocess MUST chain a full
@@ -477,28 +422,27 @@ def reprocess_year(year_num: int) -> None:
 def refresh_teams() -> Dict[str, int]:
     """Refresh all stale team fields from TBA and recompute win records.
 
-    Works in both modes (DB retirement Phase 1 item 4): the staleness diff is
-    computed from the backend-appropriate reads (DB, or Parquet via DuckDB),
-    then persisted via the existing update_*_db writes in DB mode, or by
-    republishing exactly the affected artifacts db-less — the current-year
-    teams Parquet, teams/all, the changed team/{num} blobs, and the
-    snapshot's teams. Scheduled daily (statbotics-refresh-teams) so no
-    operator action is ever needed to keep team fields current with TBA."""
+    DB retirement Phase 1 item 4: the staleness diff is computed from the
+    backend reads (Parquet via DuckDB) and persisted by republishing exactly
+    the affected artifacts — the current-year teams Parquet, teams/all, the
+    changed team/{num} blobs, and the snapshot's teams. Scheduled daily
+    (statbotics-refresh-teams) so no operator action is ever needed to keep
+    team fields current with TBA."""
     timer = Timer()
 
     fresh_teams = load_teams_tba(cache=False)
     fresh_team_map: Dict[int, Team] = {t.team: t for t in fresh_teams}
     timer.print("Fetch TBA Teams")
 
-    # Db-less, the snapshot (not the DuckDB Parquet cache) is the diff basis
-    # when available: DuckDB's sync TTL can serve the pre-publish generation
-    # for up to 30s, and on the chained reset_curr_year path that would clobber
+    # The snapshot (not the DuckDB Parquet cache) is the diff basis when
+    # available: DuckDB's sync TTL can serve the pre-publish generation for up
+    # to 30s, and on the chained reset_curr_year path that would clobber
     # just-published post-processed fields with stale ones. The snapshot is the
     # authoritative pipeline state the publish was rendered from. Current-year
     # TeamYears come from the same snapshot for the same reason; prior years
     # from Parquet (immutable between full cycles).
     snapshot_state = None
-    if DISABLE_DB and not DISABLE_GCS:
+    if not DISABLE_GCS:
         snapshot_state = read_snapshot(CURR_YEAR)
     if snapshot_state is not None:
         snap_objs, snap_teams = snapshot_state
@@ -558,57 +502,28 @@ def refresh_teams() -> Dict[str, int]:
         if dirty:
             teams_to_update[t.team] = t
 
-    if DISABLE_DB:
-        # Db-less persistence: republish exactly the affected artifacts — the
-        # snapshot's teams, the current-year teams Parquet, teams/all, and the
-        # changed team/{num} blobs. The TeamYear/TeamEvent Parquet keeps its
-        # published team-sourced fields until the next full cycle re-derives
-        # them from TBA — matching the scope of what team pages render from
-        # team rows.
-        if teams_to_update and not DISABLE_GCS:
-            # INVARIANT: blobs first, snapshot last. The snapshot is the
-            # team-blob change-gate baseline the next partial cycle diffs
-            # against, so it may only record state whose blobs are already
-            # published. If the blob publish throws, the snapshot stays
-            # behind — recoverable: the next refresh_teams (or partial
-            # cycle, whose baseline still predates the change) re-detects
-            # the diff and republishes. Snapshot-first would leave the
-            # baseline AHEAD of unpublished blobs on failure, and the gate
-            # would report "unchanged" forever (stale team blobs until a
-            # manual full cycle).
-            publish_team_artifacts(db_teams, set(teams_to_update), all_team_years_list)
+    # Persistence: republish exactly the affected artifacts — the snapshot's
+    # teams, the current-year teams Parquet, teams/all, and the changed
+    # team/{num} blobs. The TeamYear/TeamEvent Parquet keeps its published
+    # team-sourced fields until the next full cycle re-derives them from TBA —
+    # matching the scope of what team pages render from team rows.
+    if teams_to_update and not DISABLE_GCS:
+        # INVARIANT: blobs first, snapshot last. The snapshot is the team-blob
+        # change-gate baseline the next partial cycle diffs against, so it may
+        # only record state whose blobs are already published. If the blob
+        # publish throws, the snapshot stays behind — recoverable: the next
+        # refresh_teams (or partial cycle, whose baseline still predates the
+        # change) re-detects the diff and republishes. Snapshot-first would
+        # leave the baseline AHEAD of unpublished blobs on failure, and the
+        # gate would report "unchanged" forever (stale team blobs until a
+        # manual full cycle).
+        publish_team_artifacts(db_teams, set(teams_to_update), all_team_years_list)
 
-            # The refreshed rows were mutated in place on the snapshot's
-            # teams list (when a snapshot exists), so rewriting it brings the
-            # gate baseline in step with the blobs just published.
-            if snapshot_state is not None:
-                write_snapshot(CURR_YEAR, snapshot_state[0], db_teams)
-                timer.print("Write Snapshot")
-        timer.print(f"Publish Teams ({len(teams_to_update)} rows)")
-        return {"teams_updated": len(teams_to_update)}
-
-    if teams_to_update:
-        update_teams_db(list(teams_to_update.values()))
-    timer.print(f"Update Teams ({len(teams_to_update)} rows)")
-
-    # Propagate team fields to TeamYear and TeamEvent for all updated teams
-    if teams_to_update:
-        changed_team_years = [
-            ty for ty in all_team_years_list if ty.team in teams_to_update
-        ]
-        for ty in changed_team_years:
-            src = teams_to_update[ty.team]
-            ty.name = src.name
-            ty.country = src.country
-            ty.state = src.state
-            ty.district = clean_district(ty.district)
-        update_team_years_db(changed_team_years)
-        timer.print(f"Update TeamYears ({len(changed_team_years)} rows)")
-
-        all_team_events = get_team_events_db(teams=[str(t) for t in teams_to_update])
-        for te in all_team_events:
-            te.team_name = teams_to_update[te.team].name
-        update_team_events_db(all_team_events)
-        timer.print(f"Update TeamEvents ({len(all_team_events)} rows)")
-
+        # The refreshed rows were mutated in place on the snapshot's teams
+        # list (when a snapshot exists), so rewriting it brings the gate
+        # baseline in step with the blobs just published.
+        if snapshot_state is not None:
+            write_snapshot(CURR_YEAR, snapshot_state[0], db_teams)
+            timer.print("Write Snapshot")
+    timer.print(f"Publish Teams ({len(teams_to_update)} rows)")
     return {"teams_updated": len(teams_to_update)}

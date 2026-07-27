@@ -3,7 +3,6 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 from src.constants import CURR_YEAR
 from src.data.utils import objs_type
-from src.db.functions import remove_teams_with_no_events, update_team_districts
 from src.db.models import ETag, Event, Team, TeamEvent, TeamYear, match_dict_to_objs
 from src.tba import cache as tba_cache
 from src.tba.clean_data import format_team
@@ -500,8 +499,3 @@ def process_year(
         match_objs_dict,
         new_etags_dict,
     )
-
-
-def post_process():
-    remove_teams_with_no_events()
-    update_team_districts()

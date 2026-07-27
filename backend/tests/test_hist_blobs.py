@@ -262,7 +262,6 @@ def _stub_stages(monkeypatch, ingested_ty=None):
 
 
 def test_dbless_historical_process_year_emits_parquet_and_hist_blobs(monkeypatch):
-    monkeypatch.setattr(data_main, "DISABLE_DB", True)
     monkeypatch.setattr(data_main, "DISABLE_GCS", False)
     _stub_stages(monkeypatch, ingested_ty=TeamYear(team=254, year=YEAR, count=3))
 
@@ -278,13 +277,6 @@ def test_dbless_historical_process_year_emits_parquet_and_hist_blobs(monkeypatch
         "write_hist_blobs",
         lambda year, objs, teams: hist_calls.append((year, objs, teams)),
     )
-    # Db-less mode must not attempt the DB write path.
-    monkeypatch.setattr(
-        data_main,
-        "write_objs_db",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError),
-    )
-
     teams = [Team(team=254, name="The Cheesy Poofs", rookie_year=1999)]
     teams, objs = data_main.process_year(
         YEAR, False, False, True, teams, create_objs(YEAR), {}
@@ -299,8 +291,7 @@ def test_dbless_historical_process_year_emits_parquet_and_hist_blobs(monkeypatch
 
 def test_dbless_prior_year_seeding_reads_backend(monkeypatch):
     """all_team_years=None seeds EPA from prior-year team_years via the
-    backend read — DuckDB-over-Parquet when DISABLE_DB (mocked here)."""
-    monkeypatch.setattr(data_main, "DISABLE_DB", True)
+    backend read — DuckDB-over-Parquet (mocked here)."""
     monkeypatch.setattr(data_main, "DISABLE_GCS", True)
     _stub_stages(monkeypatch)
 
@@ -334,7 +325,6 @@ def test_dbless_prior_year_seeding_reads_backend(monkeypatch):
 
 
 def test_reprocess_year_dbless_chains_curr_year_re_render(monkeypatch):
-    monkeypatch.setattr(data_main, "DISABLE_DB", True)
     calls: List[Any] = []
 
     monkeypatch.setattr(
@@ -368,7 +358,7 @@ def test_reprocess_year_dbless_chains_curr_year_re_render(monkeypatch):
 
 def test_reprocess_year_has_no_backfill_blobs_dependency():
     """The DB-reading backfill scripts are retired: reprocess_year must not
-    reference them in either mode."""
+    reference them."""
     import inspect
 
     src = inspect.getsource(data_main.reprocess_year)

@@ -11,9 +11,11 @@ python-dotenv = "^1.0.0"
 uvicorn = "^0.23.2"
 gunicorn = "^21.2.0"
 requests = "^2.31.0"
+# SQLAlchemy is kept for the declarative models in src/db/models only (they
+# are introspected by the Parquet writer, the state snapshot, and the DuckDB
+# schemas). The Postgres/CockroachDB driver + dialect were deleted with the
+# rest of the relational code in DB retirement Phase 4.
 SQLAlchemy = "^2.0.20"
-sqlalchemy-cockroachdb = "^2.0.1"
-psycopg2 = "^2.9.7"
 attrs = "^23.1.0"
 scipy = "^1.11.1"
 CacheControl = "^0.13.1"

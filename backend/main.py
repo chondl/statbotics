@@ -13,7 +13,7 @@ load_dotenv()
 # flake8: noqa E402
 from src.api.router import router as api_router
 from src.auth import generate_api_key, get_api_key
-from src.constants import CONN_STR, PROD
+from src.constants import PROD
 from src.data.router import (
     data_router as data_data_router,
     site_router as data_site_router,
@@ -76,7 +76,6 @@ def get_info():
 
     return {
         "PROD": PROD,
-        "CONN_STR": "REDACTED" if PROD else CONN_STR,
         "PYTHON_VERSION": platform.python_version(),
         "DB_LESS_SEED_INCOMPLETE": data_main.db_less_seed_incomplete,
         "DB_LESS_PUBLISH_SKIPPED": data_main.db_less_publish_skipped,

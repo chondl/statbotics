@@ -61,15 +61,14 @@ def test_malformed_key_rejected(monkeypatch):
     assert calls == []
 
 
-# ---------------- /v3/site/update_curr_year db-less probe branch --------------
+# ---------------- /v3/site/update_curr_year snapshot probe branch -------------
 
 
 def test_site_update_dbless_snapshot_miss_skips_probe(monkeypatch):
-    # Db-less, an unreadable snapshot must degrade to "assume no new data":
-    # skip without probing TBA (an empty etag baseline would always report
-    # new data) and without triggering a partial cycle (which the pipeline's
+    # An unreadable snapshot must degrade to "assume no new data": skip
+    # without probing TBA (an empty etag baseline would always report new
+    # data) and without triggering a partial cycle (which the pipeline's
     # snapshot-miss guard would skip anyway).
-    monkeypatch.setattr(dr, "DISABLE_DB", True)
     monkeypatch.setattr(dr, "read_snapshot", lambda year: None)
     monkeypatch.setattr(
         dr,
@@ -90,7 +89,6 @@ def test_site_update_dbless_snapshot_miss_skips_probe(monkeypatch):
 
 
 def test_site_update_dbless_snapshot_hit_probes_and_backgrounds(monkeypatch):
-    monkeypatch.setattr(dr, "DISABLE_DB", True)
     snap_objs = ("year", {}, {}, {}, {}, {})
     monkeypatch.setattr(dr, "read_snapshot", lambda year: (snap_objs, []))
     monkeypatch.setattr(dr, "check_year_partial_tba", lambda y, e, t: True)

@@ -16,30 +16,6 @@ BACKEND_URL = os.getenv("BACKEND_URL") or (
     "https://api.statbotics.io" if PROD else "http://localhost:8001"
 )
 
-# DB
-
-CRDB_USER = os.getenv("CRDB_USER", "")
-CRDB_PWD = os.getenv("CRDB_PWD", "")
-CRDB_HOST = os.getenv("CRDB_HOST", "")
-
-# DATABASE_URL, if set, overrides the CockroachDB connection string entirely.
-# Used to run the backend against plain PostgreSQL (e.g. Cloud SQL staging),
-# e.g. "postgresql+psycopg2://user:pwd@host:5432/statbotics3". The transaction
-# helper (src/db/transaction.py) selects retry behavior from the engine dialect.
-CONN_STR = os.getenv("DATABASE_URL") or (
-    (
-        "cockroachdb://"
-        + CRDB_USER
-        + ":"
-        + CRDB_PWD
-        + "@"
-        + CRDB_HOST
-        + "/statbotics3?sslmode=verify-full&sslrootcert=root.crt"
-    )
-    if PROD
-    else "cockroachdb://root@localhost:26257/statbotics3?sslmode=disable"
-)
-
 # API
 
 AUTH_KEY_BLACKLIST: List[str] = []
@@ -48,8 +24,15 @@ AUTH_KEY_BLACKLIST: List[str] = []
 
 CURR_YEAR = 2026
 DISABLE_GCS = False
-DISABLE_DB = os.getenv("DISABLE_DB", "False") == "True"
 HIST_EPOCH = 1
+
+# DB retirement Phase 4 (design 2026-07-20 §2): there is no relational
+# database. Serving and persistence are DuckDB-over-Parquet + GCS blobs, and
+# every DB read/write path has been deleted. DISABLE_DB is kept only as an
+# accepted-but-vestigial env var so the deploy tooling that still sets
+# DISABLE_DB=True (docs/superpowers/rig/deploy/{deploy.sh,Makefile}) keeps
+# working unchanged; nothing branches on it any more.
+DISABLE_DB = os.getenv("DISABLE_DB", "True") == "True"
 
 # MISC
 
