@@ -145,18 +145,16 @@ EOF
   rm -f "$cfg"
 }
 
-# Full-stack mode: serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb).
-# DISABLE_DB=True is now baked into the deploy, not applied afterwards. The
-# Phase 2 flip (2026-07-21T16:07Z) soaked cleanly and Phase 4 deleted the
-# instance on 2026-07-27, so there is no DB to fall back to: a stand-up that
-# landed in DB mode would simply crash. `make flip-db` no longer has a target.
+# Serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb). There is no
+# database and no flag to disable one — that is simply how the backend works
+# (DB retirement completed 2026-07-27).
 API_BACKEND="${API_BACKEND:-duckdb}"
 
 step_backend() {
   gc run deploy "$API_SERVICE" \
     --image="$IMAGE_API" --region="$REGION" --platform=managed \
     --allow-unauthenticated \
-    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|API_BACKEND=$API_BACKEND|DISABLE_DB=True" \
+    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|API_BACKEND=$API_BACKEND" \
     --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest" \
     --min-instances=0 --max-instances="$MAX_INSTANCES" \
     --cpu="$API_CPU" --memory="$API_MEMORY" --timeout=3600
@@ -176,7 +174,7 @@ step_seed() {
   gc run jobs delete "$SEED_JOB" --region="$REGION" --quiet 2>/dev/null || true
   gc run jobs create "$SEED_JOB" \
     --image="$IMAGE_API" --region="$REGION" \
-    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|DISABLE_DB=True" \
+    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME" \
     --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest" \
     --command=python --args="^@@@^-c@@@$seed" \
     --cpu=2 --memory="$SEED_MEMORY" --task-timeout=7200 --max-retries=0

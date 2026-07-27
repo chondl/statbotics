@@ -164,13 +164,12 @@ ship: SHIP := 1
 ship: build deploy ## ⭐ THE ONLY WAY TO DEPLOY: build both images + roll both services
 
 # ---------------------------- DB RETIREMENT (DONE) ----------------------------
-# The `flip-dbless` / `flip-db` targets are GONE, and deliberately so. Phase 2
-# flipped production db-less on 2026-07-21T16:07Z; it soaked 5 d 9 h clean, and
-# Phase 4 (2026-07-27) deleted the Cloud SQL instance, the `db-password`
-# secret, and the `cloudsql.client` grant. There is no database to flip back
-# to — `flip-db` would now set DISABLE_DB=False and take production down.
-# DISABLE_DB=True is baked into deploy.sh's step_backend, so a from-scratch
-# stand-up lands db-less without a follow-up step.
+# There is no database, and no mode flag either. Retirement completed
+# 2026-07-27: the Cloud SQL instance, the `db-password` secret, and the
+# `cloudsql.client` grant were deleted, then the DB code and finally the
+# `DISABLE_DB` flag itself. Serving and persistence are DuckDB-over-Parquet +
+# GCS blobs, unconditionally. If you are looking for a `flip-db` target to
+# switch modes: there are no modes.
 
 # --------------------------- DATA: CURRENT YEAR ------------------------------
 .PHONY: reprocess-curr-year update-curr-year
@@ -214,10 +213,8 @@ refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync +
 # edge is fine" caveat does not apply — `jobs execute --wait` returns only
 # when everything (chain included) finished.
 #
-# Db-less only since Phase 4 (2026-07-27) deleted the Cloud SQL instance — the
-# binding, DATABASE_URL, and PGPASSWORD are gone from this recipe and DISABLE_DB
-# is pinned True. The retired backfill_parquet.py / backfill_blobs.py operator
-# scripts are superseded by this driver + a db-less reset_all_years (see
+# The retired backfill_parquet.py / backfill_blobs.py operator scripts are
+# superseded by this driver + reset_all_years (see
 # ../../deliverables/historical-backfill.md).
 JOB_NAME ?= statbotics-reprocess-$(YEAR)
 REPROCESS_DRIVER = import src.db.models, src.data.main as dm; dm.reprocess_year($(YEAR)); print('REPROCESS_$(YEAR)_COMPLETE (parquet + hist blobs + chained curr-year re-render)')
@@ -229,7 +226,7 @@ reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-
 	$(GC) run jobs delete $(JOB_NAME) --region $(REGION) --quiet 2>/dev/null || true; \
 	$(GC) run jobs create $(JOB_NAME) \
 	  --image $(IMAGE_API) --region $(REGION) \
-	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))|DISABLE_DB=True" \
+	  --set-env-vars "^|^PROD=True|GCS_BUCKET=$(BUCKET_NAME)$(if $(REFRESH_TBA),|REFRESH_TBA=$(REFRESH_TBA))" \
 	  --set-secrets "TBA_AUTH_KEY=tba-auth-key:latest" \
 	  --command python --args "^@@@^-c@@@$(REPROCESS_DRIVER)" \
 	  --cpu 2 --memory $(API_MEMORY) --task-timeout 3600 --max-retries 0; \

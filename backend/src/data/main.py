@@ -28,19 +28,19 @@ from src.tba.clean_data import clean_district
 
 # Set true when a db-less cross-season EPA seed found no prior-year data (a
 # partial/forgotten Parquet backfill); surfaced via /info so it is not silent.
-db_less_seed_incomplete = False
+seed_incomplete = False
 
 # Set true when a db-less full cycle skipped publish_curr_year because its
 # teams never went through post_process (the all-years team_years read
 # failed); cleared when a later full cycle publishes successfully. Surfaced
 # via /info so it is not silent.
-db_less_publish_skipped = False
+publish_skipped = False
 
 # Set true when a db-less partial cycle found no readable snapshot (e.g. a
 # transient GCS failure) and was skipped entirely — see the guard in
 # _update_curr_year. Cleared by the next partial cycle that reads the
 # snapshot successfully. Surfaced via /info so it is not silent.
-db_less_partial_skipped = False
+partial_skipped = False
 
 
 @contextmanager
@@ -99,8 +99,8 @@ def process_year(
         except Exception:
             traceback.print_exc()
         if year_num > 2002 and not all_team_years:
-            global db_less_seed_incomplete
-            db_less_seed_incomplete = True
+            global seed_incomplete
+            seed_incomplete = True
             print(
                 "WARNING: db-less mode found no prior-year team_years for "
                 f"{year_num}; every team will regress to the rookie mean. Back-fill "
@@ -302,7 +302,7 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             snapshot_loaded = True
             timer.print("Read Snapshot")
 
-    global db_less_partial_skipped
+    global partial_skipped
     if objs is None or teams is None:
         if partial:
             # INVARIANT (db-less): a partial cycle may only run from the
@@ -314,12 +314,12 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             # snapshot/blobs/current-year Parquet. Skip the cycle entirely:
             # process nothing, publish nothing. The next successful snapshot
             # read (or an operator full reset) resumes normal operation.
-            db_less_partial_skipped = True
+            partial_skipped = True
             print(
                 "ERROR: db-less partial cycle SKIPPED — snapshot "
                 "unreadable, and running from empty objs would publish "
                 "near-empty artifacts over good ones. Surfaced via /info "
-                "DB_LESS_PARTIAL_SKIPPED."
+                "PARTIAL_SKIPPED."
             )
             return
         teams = load_teams_tba(cache=True)
@@ -327,7 +327,7 @@ def _update_curr_year(partial: bool, tba_partial: bool):
         timer.print("Load Teams (TBA)")
     elif partial:
         # Snapshot readable again: normal partial operation resumes.
-        db_less_partial_skipped = False
+        partial_skipped = False
 
     # On the snapshot-fallback path (partial but snapshot_loaded False), the
     # team-row baseline is invalid — see process_year for the reasoning.
@@ -367,7 +367,7 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             all_team_years[year] = {ty.team: ty for ty in objs[1].values()}
             teams = post_process(teams, all_team_years)
 
-        global db_less_publish_skipped
+        global publish_skipped
         if prior_tys is None:
             # INVARIANT (DB retirement Phase 1): a full cycle may only publish
             # teams that went through post_process. Here the teams list is
@@ -376,17 +376,17 @@ def _update_curr_year(partial: bool, tba_partial: bool):
             # clobber good published blobs, the teams Parquet, AND the
             # snapshot partial cycles resume from. Skip the publish; the next
             # successful full cycle republishes everything.
-            db_less_publish_skipped = True
+            publish_skipped = True
             print(
                 "ERROR: db-less full cycle SKIPPING publish_curr_year — teams "
                 "never went through post_process (all-years team_years read "
                 "failed), so publishing would clobber good artifacts with "
                 "empty career fields. Surfaced via /info "
-                "DB_LESS_PUBLISH_SKIPPED."
+                "PUBLISH_SKIPPED."
             )
         else:
             publish_curr_year(objs, teams)
-            db_less_publish_skipped = False
+            publish_skipped = False
 
 
 def reprocess_year(year_num: int) -> None:

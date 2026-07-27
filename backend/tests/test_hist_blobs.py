@@ -311,14 +311,14 @@ def test_dbless_prior_year_seeding_reads_backend(monkeypatch):
         return objs
 
     monkeypatch.setattr(data_main, "process_year_epa", spy_epa)
-    data_main.db_less_seed_incomplete = False
+    data_main.seed_incomplete = False
 
     teams = [Team(team=254, name="The Cheesy Poofs", rookie_year=1999)]
     data_main.process_year(YEAR, False, False, True, teams, create_objs(YEAR), None)
 
     assert requested_years == list(range(YEAR - 4, YEAR))
     assert seeded and seeded[0][YEAR - 1][254] is prior
-    assert data_main.db_less_seed_incomplete is False
+    assert data_main.seed_incomplete is False
 
 
 # ------------------------- reprocess_year (db-less) ---------------------------

@@ -77,9 +77,9 @@ def get_info():
     return {
         "PROD": PROD,
         "PYTHON_VERSION": platform.python_version(),
-        "DB_LESS_SEED_INCOMPLETE": data_main.db_less_seed_incomplete,
-        "DB_LESS_PUBLISH_SKIPPED": data_main.db_less_publish_skipped,
-        "DB_LESS_PARTIAL_SKIPPED": data_main.db_less_partial_skipped,
+        "SEED_INCOMPLETE": data_main.seed_incomplete,
+        "PUBLISH_SKIPPED": data_main.publish_skipped,
+        "PARTIAL_SKIPPED": data_main.partial_skipped,
     }
 
 
