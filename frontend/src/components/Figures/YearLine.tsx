@@ -8,7 +8,7 @@ import WindowedSelect from "react-windowed-select";
 
 import { getTeamYearTeamMatches } from "../../api/teams";
 import { APITeamMatch, APITeamYear } from "../../types/api";
-import { classnames } from "../../utils";
+import { classnames, formatTeamNumber } from "../../utils";
 import { multiSelectStyles } from "../multiSelect";
 import LineChart from "./Line";
 import { getYAxisOptions } from "./shared";
@@ -72,7 +72,10 @@ const YearLineChart = ({
   const topTeams = teamYears
     ?.sort((a, b) => yAxis.yearAccessor(b) - yAxis.yearAccessor(a))
     ?.slice(0, 3)
-    ?.map((team) => ({ value: team.team, label: `${team.team} | ${team.name}` }));
+    ?.map((team) => ({
+      value: team.team,
+      label: `${formatTeamNumber(team.team)} | ${team.name}`,
+    }));
 
   const selectedTeamNums: number[] = selectedTeams.map((team) => team.value);
 
@@ -82,7 +85,7 @@ const YearLineChart = ({
       const currData = allData[teamNum];
       const N = currData?.length || 0;
       let teamData = {
-        id: teamNum,
+        id: formatTeamNumber(teamNum),
         data:
           currData?.map((teamMatch: APITeamMatch, i) => ({
             x: xAxis === "match" ? i : i / Math.max(1, N),

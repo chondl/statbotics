@@ -103,6 +103,35 @@ CockroachDB via SQLAlchemy 2.0. Seven tables defined in `src/db/models/`:
 - `breakdown.py` — game-specific score breakdown parsing (see above).
 - Auth key is in `src/tba/constants.py` via env var `TBA_KEY`.
 
+### Packed team ids (B/C/D… teams)
+
+Second robots (`frc604B`, `frc498E`) are common at offseason events but have no
+team number of their own, and every team key in the schema is an `Integer`.
+They are packed by `parse_team()` in `clean_data.py`: **team number in the low
+16 bits, suffix letter in the bits above** (`604B` → `(1 << 16) | 604` =
+66140). Suffixes run B–Z. `format_team()` is the inverse and is what
+`src/data/tba.py` uses to name the synthesized `Team` row; the frontend mirrors
+it as `formatTeamNumber` in `frontend/src/utils.tsx`.
+
+Gotchas:
+- **Any team id > 65535 is a packed id, not a real team.** Never show one raw —
+  run it through `format_team`/`formatTeamNumber`.
+- B-teams have no TBA team entry, so they always hit the "synthesize a `Team`
+  row" branch in `process_year_tba`.
+- Before this existed, a single B-team in an event's matches **dropped the whole
+  event** (and `EVENT_BLACKLIST` still holds pre-existing entries like
+  `2025miwrc  # B teams in matches`).
+
+### Offseason quality filters re-run every cycle
+
+The offseason filters live inside `get_events()`, but the data they judge
+(rosters, schedules) sits at *other* URLs with their own etags — the
+`{year}/events` etag only moves on event metadata. So `process_year_tba` fetches
+the event list with `revalidate=True`: on the explicit-etag path a 304 makes
+`get_events` return an **empty list**, and an event dropped for "<6 teams"
+before its roster went up could never re-enter. The per-event probes are tiered
+(`OFFSEASON_REVALIDATION_HOURS`) to keep that cheap.
+
 ## Season Prep
 
 Update these at the start of each new season:

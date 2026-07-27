@@ -7,6 +7,7 @@ import Select from "react-select";
 import { APITeamMatch, APITeamYear } from "../../types/api";
 import LineChart from "./Line";
 import { getYAxisOptions } from "./shared";
+import { formatTeamNumber } from "../../utils";
 
 const TeamLineChart = ({
   teamNum,
@@ -39,7 +40,7 @@ const TeamLineChart = ({
 
   let teamData = [
     {
-      id: teamNum.toString(),
+      id: formatTeamNumber(teamNum),
       data: arr,
     },
   ];

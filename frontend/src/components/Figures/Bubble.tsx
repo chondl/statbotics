@@ -10,6 +10,7 @@ import { APITeamEvent, APITeamYear } from "../../types/api";
 import { ColumnBar, getColumnOptionsDict } from "../columns";
 import { filterData } from "../filter";
 import { FilterBar } from "../filterBar";
+import { formatTeamNumber } from "../../utils";
 
 if (typeof Highcharts === "object") {
   HC_more(Highcharts);
@@ -19,7 +20,7 @@ type ScatterData = {
   x: number;
   y: number;
   z: number;
-  num: number;
+  num: string;
   labelInt: number;
 };
 
@@ -90,7 +91,7 @@ const BubbleChart = ({
     x: xAxis.accessor(datum),
     y: yAxis.accessor(datum),
     z: zAxis.accessor(datum),
-    num: datum.team,
+    num: formatTeamNumber(datum.team),
     labelInt: 0,
   }));
 

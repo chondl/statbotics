@@ -12,7 +12,7 @@ import { useRouter } from "next/navigation";
 import { getAllEvents, getAllTeams } from "../api/header";
 import { Option } from "../components/multiSelect";
 import { ShortEvent, ShortTeam } from "../types/data";
-import { classnames } from "../utils";
+import { classnames, formatTeamNumber } from "../utils";
 
 const loaderProp = ({ src }) => {
   return src;
@@ -39,7 +39,7 @@ const Navbar = () => {
     ?.sort((a, b) => parseInt(a.team) - parseInt(b.team))
     ?.map((team: ShortTeam) => ({
       value: `/team/${team.team}`,
-      label: `${team.team} | ${team.name}`,
+      label: `${formatTeamNumber(team.team)} | ${team.name}`,
     }));
 
   const eventOptions = events
