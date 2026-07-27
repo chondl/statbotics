@@ -20,7 +20,7 @@ A deployment that has only the current season is wrong in two ways:
    same rookie constant, so current-season EPAs are systematically off for
    strong and weak teams alike. Db-less, `process_year` seeds each year's EPA
    from the prior 4 years' `team_years` Parquet via DuckDB; if those are
-   missing, `/info` surfaces `DB_LESS_SEED_INCOMPLETE: true`.
+   missing, `/info` surfaces `SEED_INCOMPLETE: true`.
 2. **Historical site pages are empty.** `/teams?year=2015`, historical event
    pages, and a team's multi-year history read `hist/{epoch}/…` blobs from the
    bucket that would not exist.
@@ -105,7 +105,7 @@ make reprocess-year YEAR=2025
       year 2002…CURR_YEAR−1 except 2021, then the current-year publish.
 - [ ] `manifest.json` has `parquet/{year}/*.parquet` refs for all years
       (6 tables/year) and a current `hist_epoch`.
-- [ ] `/info` shows no `DB_LESS_SEED_INCOMPLETE` / `DB_LESS_PUBLISH_SKIPPED`.
+- [ ] `/info` shows no `SEED_INCOMPLETE` / `PUBLISH_SKIPPED`.
 - [ ] A strong team's current-year `epa_start` is not the rookie constant
       (254/1678 seed well above a first-year team).
 - [ ] Frontend historical pages render from the bucket: `/teams?year=2015`, a

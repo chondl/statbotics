@@ -148,13 +148,21 @@ EOF
 # Serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb). There is no
 # database and no flag to disable one — that is simply how the backend works
 # (DB retirement completed 2026-07-27).
+#
+# BACKEND_URL is MANDATORY and easy to miss. The ETL self-trigger (the ping
+# probe and update_curr_year_background) HTTP-calls it to reach the data
+# router, which on this single-container mirror is the SAME service. If it is
+# unset, src/constants.py falls back to https://api.statbotics.io — UPSTREAM's
+# API — and the mirror's ingestion silently stops running while every health
+# check still passes. It was missing from this step until 2026-07-27; the live
+# service had it only because it was set by hand.
 API_BACKEND="${API_BACKEND:-duckdb}"
 
 step_backend() {
   gc run deploy "$API_SERVICE" \
     --image="$IMAGE_API" --region="$REGION" --platform=managed \
     --allow-unauthenticated \
-    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|API_BACKEND=$API_BACKEND" \
+    --set-env-vars="^|^PROD=True|GCS_BUCKET=$BUCKET_NAME|API_BACKEND=$API_BACKEND|BACKEND_URL=https://$API_DOMAIN" \
     --set-secrets="TBA_AUTH_KEY=tba-auth-key:latest" \
     --min-instances=0 --max-instances="$MAX_INSTANCES" \
     --cpu="$API_CPU" --memory="$API_MEMORY" --timeout=3600

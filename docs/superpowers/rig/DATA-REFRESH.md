@@ -34,14 +34,13 @@ Every trigger runs the same function: `process_year()` in
    to event and year; `metrics.py` computes normalized EPA.
 5. If `year == CURR_YEAR` — publish compressed blobs to GCS and fold current-year
    Parquet into a single `manifest.json` write; historical years publish their
-   Parquet + `hist/` site blobs instead. GCS is the store.
-6. `write_objs_db` — **dead path.** It only ran with `DISABLE_DB=False`, and
-   since Phase 4 (2026-07-27) there is no database: the Cloud SQL instance is
-   deleted. GCS is the only store.
+   Parquet + `hist/` site blobs instead. **GCS is the only store** — the
+   pipeline ends here.
 
 **EPA is a full-season replay every cycle — O(season), not incremental.** The
-`partial` and `tba_partial` flags change only the *DB read strategy* and the
-*TBA fetch scope*, never the EPA math. A partial cycle and a full cycle produce
+`partial` and `tba_partial` flags change only *how much prior state is loaded*
+(a snapshot resume versus a cold rebuild) and the *TBA fetch scope*, never the
+EPA math. A partial cycle and a full cycle produce
 the same ratings from the same data. (An incremental O(new-matches) design was
 proposed in the [2026-04-11 spec](../specs/2026-04-11-duckdb-static-files-rearchitecture-design.md)
 and **rejected** — see that file's superseded banner.)
@@ -73,7 +72,6 @@ Both automatic triggers call the **same probe**,
                               GET /v3/data/update_curr_year
                               = update_curr_year(partial=True, tba_partial=True)
                               = full-season EPA replay + GCS/Parquet publish
-                                (+ DB write only while DISABLE_DB=False)
 ```
 
 ### (A) Hourly scheduler — the idle backstop
@@ -137,7 +135,7 @@ automatic:
 | Command | Endpoint | Effect |
 |---|---|---|
 | `make reprocess-curr-year` | `/v3/data/reset_curr_year` | Full current-year recompute, fresh TBA fetch, **no etag gate**. Picks up events already on TBA. ~4–6 min. |
-| `make reprocess-year YEAR=` | Cloud Run job | One historical year via `reprocess_year()`: `process_year(partial=False)` + Parquet + hist blobs + chained current-year re-render. Db-less capable (`DISABLE_DB=True`). |
+| `make reprocess-year YEAR=` | Cloud Run job | One historical year via `reprocess_year()`: `process_year(partial=False)` + Parquet + hist blobs + chained current-year re-render. |
 | `make update-curr-year` | `/v3/site/update_curr_year` | Same cheap gated path as the hourly cron (manual poke). |
 | full history | `reset_all_years` | Rebuild 2002→present. See [historical-backfill.md](../deliverables/historical-backfill.md). |
 

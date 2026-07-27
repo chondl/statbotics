@@ -53,16 +53,13 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
 - Snapshot + Parquet publishing are **on by default in the code** (no flag). Each
   cycle writes `state/snapshot.{year}` and folds current-year Parquet into the
   single manifest write.
-- `DISABLE_DB=True` — **the deployed production mode since 2026-07-21T16:07Z**,
-  and since Phase 4 (2026-07-27) **permanent**: the Cloud SQL instance is gone,
-  so this is no longer a flip with a rollback but simply how the service runs.
-  It is baked into `deploy.sh`'s `step_backend`, and the `make flip-dbless` /
-  `make flip-db` targets have been removed. The backend constructs no
-  engine/session, skips all DB writes, and serves `/v3`+`/v3/site` purely from
-  Parquet + the snapshot. **Never set `DISABLE_DB=False`** — it would take
-  production down. Health signal: `/info` shows `DB_LESS_SEED_INCOMPLETE: false`
+- **There is no database, and no flag for not having one.** The backend
+  constructs no engine or session and serves `/v3`+`/v3/site` purely from
+  Parquet + the snapshot — unconditionally. The `DISABLE_DB` flag that used to
+  select this was deleted on 2026-07-27 once it had exactly one legal value;
+  don't reintroduce it. Health signal: `/info` shows `SEED_INCOMPLETE: false`
   when the historical Parquet backfill is intact (it is: 144 objects, 24 years ×
-  6 tables).
+  6 tables), alongside `PUBLISH_SKIPPED` and `PARTIAL_SKIPPED`.
 
 ## Historical Parquet + hist blobs (pipeline-owned)
 
