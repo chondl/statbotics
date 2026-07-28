@@ -57,9 +57,21 @@ The `EPA` class (in `main.py`) extends the `Model` base class (`src/models/templ
 - `start_season()` — initialize per-team ratings from prior years
 - `predict_match()` — produce score predictions for both alliances
 - `attribute_match()` — compute per-team error attribution after a match
-- `update_team()` — update the team's rating distribution
+- `update_team()` — update the team's rating
 
-Each team's rating is a `SkewNormal` distribution (`src/models/epa/math.py`).
+Each team's rating is an `EPARating` (`src/models/epa/math.py`): a per-dimension
+mean vector updated by an exponentially-weighted moving average (`add_obs`). It
+carries **no variance** — there is no per-team `sd`.
+
+> **Gotcha — this replaced a `SkewNormal` distribution in upstream #412
+> (`169330e`, 2026-06-11), and that removed public API fields.** Along with the
+> distribution went the `epa_sd`/`epa_skew`/`epa_n` columns on `TeamEvent` and
+> `TeamYear`, and with them `epa.total_points.{mean,sd}` (now a bare float) and
+> `epa.conf` on `/v3/team_events` and `/v3/team_years`. Clients written against
+> the pre-June-2026 API break on this. `Event.epa_sd` is unrelated and still
+> exists — it is the stdev *across* a field's teams (`src/data/epa/agg.py`), not
+> a team's own uncertainty. Restoring `sd` would mean re-adding model state, not
+> just a serializer change.
 
 **EPA dimensions** (for 2016+): `[total, auto, teleop, endgame, rp_1, rp_2, rp_3, tiebreaker, comp_0..comp_9]` — indices 0-17 (max). Pre-2016 only uses `total`.
 
