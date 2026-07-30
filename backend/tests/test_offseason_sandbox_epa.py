@@ -161,3 +161,27 @@ def test_unknown_team_seeds_from_init_rating():
     model.enter_sandbox("2026cc")
     assert model.epas[9999].mean[0] == 0.0  # the defaultdict's init rating
     model.exit_sandbox()
+
+
+def test_zero_qual_count_fallback_records_sandbox_not_frozen():
+    """wins.py excludes offseason matches from records, so qual_count is 0 for
+    every offseason team event -- including ones that played a full schedule.
+    calc.py's 'no matches played yet' fallback must therefore run inside the
+    event's sandbox, or it pins TeamEvent.epa back to the frozen season rating.
+    """
+    model = mk_epa_model()
+    event = Event(
+        key="2026iri", year=2026, name="IRI", type=EventType.OFFSEASON, week=9
+    )
+
+    # the event's matches moved the fork well above the season rating
+    model.enter_sandbox(event.key)
+    model.epas[254].mean[0] = 281.7
+    model.exit_sandbox()
+
+    te = TeamEvent(team=254, year=2026, event="2026iri")
+    with model._sandbox(event):
+        model.post_record_team(254, te, None)
+
+    assert te.epa == 281.7, "fallback must record the evolved fork"
+    assert model.epas[254].mean[0] == 100.0, "real rating still untouched"
