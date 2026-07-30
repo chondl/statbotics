@@ -138,6 +138,33 @@ Gotchas:
   event** (and `EVENT_BLACKLIST` still holds pre-existing entries like
   `2025miwrc  # B teams in matches`).
 
+### Offseason EPA is per-event sandboxed — and `qual_count` lies about it
+
+Offseason matches no longer skip rating updates. `Model.process_match` wraps
+each one in `_sandbox(event)`, which swaps `self.epas`/`self.counts` for
+event-scoped copy-on-first-touch forks (`SandboxRatings`/`SandboxCounts` in
+`src/models/epa/main.py`). Ratings evolve within the event and touch nothing
+else; `post_record_team` gets `ty=None` so `TeamYear` is never stamped.
+Containment lives in `src/data/epa/agg.py` — see the
+[design spec](../docs/superpowers/specs/2026-07-30-per-event-offseason-epa-design.md).
+
+> **Gotcha — `team_event.qual_count == 0` for EVERY offseason team event**,
+> including ones that played a full schedule, because `src/data/wins.py`
+> excludes offseason matches from records. Anything gated on "no matches
+> played yet" therefore fires for offseason events that *did* play. This bit
+> the sandbox once: `calc.py`'s trailing `post_record_team` fallback ran
+> outside the sandbox and overwrote every offseason `TeamEvent.epa` with the
+> team's frozen season rating, while `epa_mean`/`epa_max` still showed the
+> fork evolving. That fallback now runs inside `model._sandbox(...)`. If you
+> add another `qual_count`-gated branch, decide explicitly what it should do
+> for offseason events.
+
+Verify isolation with
+`PYTHONPATH=. PROD=True GCS_BUCKET=statbotics-staging-site poetry run python
+scripts/verify_offseason_isolation.py 2025 2026` (every TeamYear rating field
+must be bit-identical), and prediction quality with
+`python -m src.models.backtest 2025 2026`.
+
 ### Offseason quality filters re-run every cycle
 
 The offseason filters live inside `get_events()`, but the data they judge
