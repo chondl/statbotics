@@ -300,6 +300,38 @@ bill: ## Per-day gross / free-tier / trial-credit / net spend. Usage: make bill 
 bill-services: ## Gross spend per service over the window. Usage: make bill-services [DAYS=30]
 	@$(BQ) 'SELECT service.description AS service, ROUND(SUM(cost),2) AS gross, ROUND(SUM(cost)/COUNT(DISTINCT DATE(usage_start_time)),3) AS per_day FROM `$(BILLING_TABLE)` $(BILL_WINDOW) GROUP BY service HAVING gross > 0 ORDER BY gross DESC'
 
+# ------------------------- ARTIFACT REGISTRY CLEANUP -------------------------
+# Every `make ship` pushes a new statbotics-api + statbotics-web image and moves
+# the `:latest` tag off the previous one, so the repo accumulates untagged
+# versions forever. By 2026-07-30 that was 59 versions / 34.9 GB and $0.11/day
+# — the only cost line that grows monotonically, and the largest recurring one
+# left after Cloud SQL was decommissioned (see ../BILLING.md).
+#
+# The policy in artifact-cleanup-policy.json deletes untagged versions older
+# than 7 days, with two Keep rules in front of it. Keep beats Delete in
+# Artifact Registry regardless of rule order, so the 5 newest versions of each
+# package and whatever currently carries `:latest` are never eligible.
+#
+# Why that is safe: Cloud Run pins each revision to a DIGEST, and the digest
+# serving traffic is always the one `:latest` resolved to at deploy time — so
+# the live image is protected twice over (newest + tagged). Reprocess jobs are
+# created from `:latest` on demand and deleted after, so nothing else pins an
+# old digest. What this DOES give up is `gcloud run services update-traffic`
+# rollback to revisions older than the keep window; the rollback path is to
+# rebuild from the cph-staging branch, which is the documented one anyway.
+CLEANUP_POLICY := $(dir $(lastword $(MAKEFILE_LIST)))artifact-cleanup-policy.json
+AR_CMD          = $(GC) artifacts repositories
+
+.PHONY: cleanup-policy cleanup-policy-dry-run cleanup-policy-show
+cleanup-policy: ## Apply the Artifact Registry cleanup policy (ENFORCING — deletes images)
+	$(AR_CMD) set-cleanup-policies $(AR_REPO) --location $(REGION) --policy $(CLEANUP_POLICY) --no-dry-run
+
+cleanup-policy-dry-run: ## Apply the cleanup policy in dry-run mode (logs what it would delete, deletes nothing)
+	$(AR_CMD) set-cleanup-policies $(AR_REPO) --location $(REGION) --policy $(CLEANUP_POLICY) --dry-run
+
+cleanup-policy-show: ## Show the live cleanup policy, dry-run flag, and current repo size
+	@$(AR_CMD) describe $(AR_REPO) --location $(REGION) --format="yaml(cleanupPolicies,cleanupPolicyDryRun,sizeBytes)"
+
 # --------------------------------- GUARDS / HELP -----------------------------
 .PHONY: require-YEAR require-EVENT help
 require-YEAR:
