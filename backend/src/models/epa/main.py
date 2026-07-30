@@ -9,7 +9,11 @@ from src.models.epa.breakdown import (
     post_process_attrib,
     post_process_breakdown,
 )
-from src.models.epa.constants import ELIM_WEIGHT, MEAN_REVERSION
+from src.models.epa.constants import (
+    ELIM_WEIGHT,
+    MEAN_REVERSION,
+    SANDBOX_SEED_COUNT,
+)
 from src.models.epa.init import get_init_epa
 from src.models.epa.math import EPARating
 from src.models.template import Model
@@ -19,8 +23,54 @@ from src.types.enums import MatchWinner
 from src.utils.utils import r
 
 
+class SandboxRatings(Dict[int, EPARating]):
+    """Event-scoped ratings that fork from the real ones on first touch."""
+
+    def __init__(self, base: Dict[int, EPARating]):
+        super().__init__()
+        self._base = base
+
+    def __missing__(self, team: int) -> EPARating:
+        forked = EPARating(np.array(self._base[team].mean, copy=True))
+        self[team] = forked
+        return forked
+
+
+class SandboxCounts(Dict[int, int]):
+    """Event-scoped match counts, seeded at SANDBOX_SEED_COUNT."""
+
+    def __init__(self, seed: int):
+        super().__init__()
+        self._seed = seed
+
+    def __missing__(self, team: int) -> int:
+        self[team] = self._seed
+        return self._seed
+
+
 class EPA(Model):
     k: float
+
+    def __init__(self):
+        super().__init__()
+        self._sandboxes: Dict[str, Tuple[SandboxRatings, SandboxCounts]] = {}
+        self._real_state: Optional[Tuple[Dict[int, EPARating], Dict[int, int]]] = None
+
+    def enter_sandbox(self, event_key: str) -> None:
+        sandbox = self._sandboxes.get(event_key)
+        if sandbox is None:
+            # Built while self.epas is still the real dict, so the fork base is
+            # the team's true rating -- never another event's sandbox.
+            sandbox = (SandboxRatings(self.epas), SandboxCounts(SANDBOX_SEED_COUNT))
+            self._sandboxes[event_key] = sandbox
+        self._real_state = (self.epas, self.counts)
+        self.epas, self.counts = sandbox
+
+    def exit_sandbox(self) -> None:
+        if self._real_state is None:
+            return
+        self.epas, self.counts = self._real_state
+        self._real_state = None
 
     @staticmethod
     def k_func(year: int) -> float:
@@ -51,6 +101,8 @@ class EPA(Model):
         init_rating = get_init_epa(year, None, None, MEAN_REVERSION)
         self.epas: Dict[int, EPARating] = defaultdict(lambda: init_rating)
         self.counts: Dict[int, int] = defaultdict(int)
+        self._sandboxes = {}
+        self._real_state = None
 
         for team_year in team_years.values():
             num = team_year.team
