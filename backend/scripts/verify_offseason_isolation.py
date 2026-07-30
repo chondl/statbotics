@@ -18,8 +18,7 @@ from typing import Any, Dict, List
 
 from src.data.epa.agg import process_year as process_year_agg
 from src.data.epa.calc import process_year as process_year_calc
-from src.google.snapshot import read_snapshot
-from src.models.backtest import SandboxSwitch, install_switch
+from src.models.backtest import SandboxSwitch, install_switch, load_year
 
 FIELDS = [
     "epa",
@@ -44,10 +43,7 @@ FIELDS = [
 
 
 def snapshot_team_years(year: int, sandbox: bool) -> Dict[str, Dict[str, Any]]:
-    loaded = read_snapshot(year)
-    if loaded is None:
-        raise SystemExit(f"no snapshot for {year}")
-    objs, _ = loaded
+    objs = load_year(year)
 
     SandboxSwitch.enabled = sandbox
     try:
@@ -56,7 +52,9 @@ def snapshot_team_years(year: int, sandbox: bool) -> Dict[str, Dict[str, Any]]:
     finally:
         SandboxSwitch.enabled = True
 
-    return {key: {f: getattr(ty, f, None) for f in FIELDS} for key, ty in objs[1].items()}
+    return {
+        key: {f: getattr(ty, f, None) for f in FIELDS} for key, ty in objs[1].items()
+    }
 
 
 def main(years: List[int]) -> int:

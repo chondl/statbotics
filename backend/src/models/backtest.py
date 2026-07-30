@@ -22,8 +22,17 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from src.data.epa.calc import process_year as process_year_calc
-from src.db.models import Match
+from src.data.utils import objs_type
+from src.db.models import Event, Match, TeamEvent, TeamYear, Year
+from src.db.models.event import EventORM
+from src.db.models.match import MatchORM
+from src.db.models.team_event import TeamEventORM
+from src.db.models.team_year import TeamYearORM
+from src.db.models.year import YearORM
+from src.db_duckdb.schema import columns, from_row
+from src.google.parquet import parquet_logical
 from src.google.snapshot import read_snapshot
+from src.google.storage import _bucket, read_manifest
 from src.models.template import Model
 from src.types.enums import EventType, MatchStatus, MatchWinner
 
@@ -119,13 +128,60 @@ def install_switch() -> None:
     _installed = True
 
 
+def _read_parquet_table(year: int, table: str) -> List[Dict]:
+    import io
+
+    import pyarrow.parquet as pq
+
+    manifest = read_manifest()
+    if manifest is None:
+        raise SystemExit("no manifest in the bucket")
+    key = manifest.blobs.get(parquet_logical(year, table))
+    if key is None:
+        raise SystemExit(f"no {table} parquet for {year}")
+    raw = _bucket().blob(key).download_as_bytes()
+    return pq.read_table(io.BytesIO(raw)).to_pylist()
+
+
+def load_year(year: int) -> objs_type:
+    """Pipeline objects for a year. Prefers the state snapshot (current year
+    only); falls back to the published Parquet tables for historical years."""
+    loaded = read_snapshot(year)
+    if loaded is not None:
+        return loaded[0]
+
+    specs = [
+        ("team_years", TeamYear, TeamYearORM),
+        ("events", Event, EventORM),
+        ("team_events", TeamEvent, TeamEventORM),
+        ("matches", Match, MatchORM),
+    ]
+    built: Dict[str, Dict[str, object]] = {}
+    for table, model_cls, orm in specs:
+        cols = columns(orm)
+        rows = _read_parquet_table(year, table)
+        built[table] = {}
+        for row in rows:
+            obj = from_row(model_cls, cols, row)
+            built[table][obj.pk()] = obj
+
+    year_rows = _read_parquet_table(year, "year")
+    year_obj = from_row(Year, columns(YearORM), year_rows[0])
+
+    return (
+        year_obj,
+        built["team_years"],
+        built["events"],
+        built["team_events"],
+        built["matches"],
+        {},
+    )
+
+
 def run_year(year: int, sandbox: bool) -> Tuple[Dict[str, List[Match]], List[str]]:
     """Replay a year through the real model. Returns completed offseason matches
     grouped by event key in chronological order, plus the offseason event keys."""
-    loaded = read_snapshot(year)
-    if loaded is None:
-        raise SystemExit(f"no snapshot for {year}; run the pipeline first")
-    objs, _teams = loaded
+    objs = load_year(year)
 
     SandboxSwitch.enabled = sandbox
     try:
