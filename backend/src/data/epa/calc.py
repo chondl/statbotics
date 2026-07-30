@@ -42,9 +42,17 @@ def process_year(
             curr_team_years,
         )
 
-    # Records TeamEvent EPA stats if no matches played yet
+    # Records TeamEvent EPA stats if no matches played yet.
+    #
+    # qual_count is 0 for EVERY offseason team event -- wins.py excludes
+    # offseason matches from records -- so this fallback also fires for
+    # offseason events that did play a full schedule. Run it inside the event's
+    # sandbox so it records that event's evolved fork; outside the sandbox it
+    # would overwrite the fork with the team's frozen season rating and pin
+    # every offseason TeamEvent.epa to its seed.
     for team_event in team_events.values():
-        if team_event.qual_count == 0:
-            model.post_record_team(team_event.team, team_event, None)
+        with model._sandbox(events[team_event.event]):
+            if team_event.qual_count == 0:
+                model.post_record_team(team_event.team, team_event, None)
 
     return objs

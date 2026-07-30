@@ -68,7 +68,15 @@ const OverviewSection = ({ teamYearData }: { teamYearData: TeamYearData | undefi
 
   // EventType.OFFSEASON serializes to "offseason". Key off the type, never the
   // week -- week 9 is an ingestion convention that could drift.
-  const offseasonEvents = teamEvents.filter((event) => event.type === "offseason");
+  //
+  // Hold the line until two days before the event starts. Before that the EPA
+  // shown is just the team's frozen season rating, so the line would state a
+  // number that carries no information about an event nobody has played yet.
+  const TWO_DAYS_SEC = 2 * 24 * 60 * 60;
+  const nowSec = Date.now() / 1000;
+  const offseasonEvents = teamEvents.filter(
+    (event) => event.type === "offseason" && nowSec >= event.time - TWO_DAYS_SEC
+  );
 
   if (year.year !== CURR_YEAR && matches.length === 0) {
     return (
