@@ -295,6 +295,7 @@ export type APITeamMatch = {
   week: number;
   elim: boolean;
   status: string;
+  offseason: boolean;
   epa: number;
   auto_epa: number | null;
   teleop_epa: number | null;
