@@ -24,7 +24,13 @@ AUTH_KEY_BLACKLIST: List[str] = []
 
 CURR_YEAR = 2026
 DISABLE_GCS = False
-HIST_EPOCH = 1
+# Bumped to 2 on 2026-07-30: hist blobs are immutable within an epoch, so the
+# 2025 historical blobs still held pre-offseason renders -- team pages for
+# past years showed no offseason events even after reprocess-year recomputed
+# them correctly. Bumping forces a re-export. Years not yet re-exported into
+# the new epoch fall back to the site API, which serves the same data from
+# Parquet, and the daily TBA sweep refills them one year per run.
+HIST_EPOCH = 2
 
 # There is no relational database. Serving and persistence are
 # DuckDB-over-Parquet + GCS blobs (DB retirement, completed 2026-07-27).
