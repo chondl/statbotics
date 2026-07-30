@@ -112,6 +112,38 @@ Where the data actually lives:
 | Pipeline resume state | A pickled + zstd-compressed snapshot in GCS (`src/google/snapshot.py`) |
 | Frontend reads | Pre-rendered zlib blobs plus a manifest in GCS (`src/google/storage.py`, `publish.py`) |
 
+### Past-year pages: hist blobs are immutable, and a stale one beats the API
+
+Historical (non-current-year) pages are served from `hist/{HIST_EPOCH}/…`
+objects written by `write_hist_blobs`, which **skips any object that already
+exists**. Recomputing a past year does not replace them: `reprocess-year
+YEAR=2025` republishes Parquet and recomputes everything correctly, and the
+site API immediately serves the new data — while the website keeps rendering
+the old blob.
+
+The failure is silent by construction. `resolveBucketUrl` in
+`frontend/src/api/storage.tsx` falls back to `hist/{epoch}/{path}` for any
+logical path absent from `manifest.blobs`, and `fetchAndStore` only reaches
+the site API when the blob fetch **fails**. A stale-but-valid blob therefore
+wins over correct data, with no error anywhere.
+
+This bit the offseason work: after 2025 was reprocessed with per-event
+sandbox EPA, `/v3/site/team/254/2025` returned 5 team_events and 81 matches
+while `hist/1/team/254/2025` still held 3 and 49, so past-year team pages
+showed no offseason events at all.
+
+> **Whenever you change what a past year's blobs should contain — new
+> ingestion, a new field, a renderer change — bump `HIST_EPOCH` in
+> `src/constants.py` and reprocess the affected years.** Recomputing alone is
+> not enough.
+
+Bumping invalidates *every* year, not just the one you changed. That is safe:
+years missing from the new epoch fall back to the site API, which serves the
+same data from Parquet, and the daily TBA sweep re-exports one year per run
+until the epoch refills. Expect a stretch of API-served (slower, not wrong)
+historical pages afterward; a full backfill is only worth it if you cannot
+wait.
+
 ## TBA API (`src/tba/`)
 
 - `main.py` — `get_tba()` wraps TBA HTTP calls with etag support and a local pickle cache (`cache/` dir).
