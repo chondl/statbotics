@@ -190,6 +190,51 @@ which is world-readable (`allUsers: objectViewer`). Delete it whenever you are
 comfortable; the DB is fully reproducible from TBA via a db-less
 `reset_all_years` regardless.
 
+## Artifact Registry cleanup policy 2026-07-30 (−~$0.11/day, and rising)
+
+With Cloud SQL gone, Artifact Registry storage became the largest recurring
+line item **and the only one that grows without bound**: every `make ship`
+pushes a new `statbotics-api` + `statbotics-web` image and moves `:latest` off
+the previous one, so untagged versions accumulate forever. It went $0.00/day on
+07-11 → **$0.11/day** by 07-30 — **59 versions, 57 of them untagged, 34.9 GB**,
+with no cleanup policy on the repo.
+
+The policy now on the repo is
+[`deploy/artifact-cleanup-policy.json`](deploy/artifact-cleanup-policy.json),
+applied with `make cleanup-policy` (`make cleanup-policy-show` reads back what
+is live, including the dry-run flag and current repo size):
+
+| Rule | Action | Effect |
+|------|--------|--------|
+| `keep-minimum-versions` | Keep | 5 newest versions of each of the two packages |
+| `keep-tagged-latest` | Keep | whatever currently carries `:latest` |
+| `delete-old-untagged` | Delete | untagged versions older than 7 days |
+
+**Keep beats Delete in Artifact Registry regardless of rule order** — the two
+Keep rules are not "first match wins", they are hard exemptions. Effective
+retention is therefore *everything from the last 7 days, plus at least the 5
+newest per package*. Steady state is 10 versions instead of an unbounded pile.
+
+Verified before enabling, against the live repo rather than assumed:
+
+1. **`olderThan` is measured from create time**, and the API round-trips it as
+   `604800s` — the stored policy was read back field-by-field to confirm
+   nothing was silently dropped.
+2. **The serving digests are protected twice over.** Cloud Run pins each
+   revision to a digest, and the digest serving traffic is always the one
+   `:latest` resolved to at deploy time: `statbotics-api@sha256:44a0e42…`
+   (revision `-00038`) and `statbotics-web@sha256:7dacadbe…` (revision `-00029`)
+   are each both the newest version *and* the tagged one.
+3. **Nothing else pins an old digest.** `gcloud run jobs list` is empty —
+   reprocess jobs are created from `:latest` on demand and deleted after.
+4. **Simulated the exact rules against the real version list** before enabling:
+   18 of 30 api versions and 18 of 29 web versions are immediately eligible;
+   the 07-26/27 build churn ages out over the following week.
+
+What this gives up: `update-traffic` rollback to revisions older than the keep
+window. That is acceptable — the documented rollback path is to rebuild from
+the `cph-staging` branch, and images are reproducible from git history.
+
 ## Measured actuals (2026-07-20)
 
 First real figures, from the Billing Console (the BigQuery export had still not

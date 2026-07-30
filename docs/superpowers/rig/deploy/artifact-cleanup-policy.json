@@ -1,0 +1,26 @@
+[
+  {
+    "name": "keep-minimum-versions",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {
+      "packageNamePrefixes": ["statbotics-api", "statbotics-web"],
+      "keepCount": 5
+    }
+  },
+  {
+    "name": "keep-tagged-latest",
+    "action": {"type": "Keep"},
+    "condition": {
+      "tagState": "tagged",
+      "tagPrefixes": ["latest"]
+    }
+  },
+  {
+    "name": "delete-old-untagged",
+    "action": {"type": "Delete"},
+    "condition": {
+      "tagState": "untagged",
+      "olderThan": "7d"
+    }
+  }
+]
