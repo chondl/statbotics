@@ -1,17 +1,21 @@
 import statistics
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 from src.data.utils import objs_type
 from src.db.models import Match, TeamEvent
 from src.models.epa.unitless import epa_to_unitless_epa, get_epa_to_norm_epa_func
 from src.tba.clean_data import is_synthetic_team
+from src.types.enums import EventType
 from src.utils.utils import r
 
 
 def process_year_epas(
-    matches: List[Match], team: int, default: float
+    matches: List[Match], team: int, default: float, offseason_events: Set[str]
 ) -> Tuple[float, float, float]:
+    # Offseason matches carry per-event sandbox EPA, which must never reach
+    # season aggregates -- these feed norm_epa, ranks, and next season's seed.
+    matches = [m for m in matches if m.event not in offseason_events]
     post_epas = [(m.epas or {}).get(str(team), {}).get("epa") for m in matches]
     arr = [x for x in post_epas if x is not None]
     pre_champs_arr = [
@@ -23,7 +27,9 @@ def process_year_epas(
     return pre_champs, end, max_
 
 
-def compact_from_match(match: Match, team: int) -> Dict[str, Any]:
+def compact_from_match(
+    match: Match, team: int, offseason_events: Set[str]
+) -> Dict[str, Any]:
     pre = (match.pre_epas or {}).get(str(team), {})
     post = (match.epas or {}).get(str(team), {})
     alliance = "red" if team in match.get_red() else "blue"
@@ -35,6 +41,7 @@ def compact_from_match(match: Match, team: int) -> Dict[str, Any]:
         "week": match.week,
         "elim": match.elim,
         "status": match.status,
+        "offseason": match.event in offseason_events,
         **pre,
         "post_epa": post.get("epa"),
     }
@@ -45,6 +52,11 @@ def process_year(objs: objs_type) -> objs_type:
 
     mean = year.score_mean or 0
     sd = year.score_sd or 0
+
+    # Single source of truth for "is this event offseason" across this pass.
+    offseason_events = {
+        e.key for e in objs[2].values() if e.type == EventType.OFFSEASON
+    }
 
     curr_epas: Dict[int, float] = {}
 
@@ -69,10 +81,10 @@ def process_year(objs: objs_type) -> objs_type:
         ms = team_matches_dict[ty.team]
 
         ty.epa_pre_champs, ty.epa, ty.epa_max = process_year_epas(
-            ms, ty.team, ty.epa_start
+            ms, ty.team, ty.epa_start, offseason_events
         )
 
-        ty.team_matches = [compact_from_match(m, ty.team) for m in ms]
+        ty.team_matches = [compact_from_match(m, ty.team, offseason_events) for m in ms]
 
         # Placeholder demo robots and packed second robots (604B) compete at
         # offseason events but are not season teams. norm_epa and the rank
@@ -189,7 +201,10 @@ def process_year(objs: objs_type) -> objs_type:
                 te.epa_mean = r(statistics.mean(pre_epas_nonnull), 2)
                 te.epa_max = r(max(pre_epas_nonnull), 2)
 
-            curr_epas[te.team] = te.epa  # for next event epa_start
+            # An offseason event's final sandbox EPA must not become the next
+            # event's epa_start -- that would leak IRI into Chezy Champs.
+            if te.event not in offseason_events:
+                curr_epas[te.team] = te.epa  # for next event epa_start
 
         if len(qual_tms) > 0:
             last_qual_pre = (

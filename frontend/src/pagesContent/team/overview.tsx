@@ -66,6 +66,10 @@ const OverviewSection = ({ teamYearData }: { teamYearData: TeamYearData | undefi
   const teamEvents = teamYearData?.team_events || [];
   const matches = teamYearData?.matches || [];
 
+  // EventType.OFFSEASON serializes to "offseason". Key off the type, never the
+  // week -- week 9 is an ingestion convention that could drift.
+  const offseasonEvents = teamEvents.filter((event) => event.type === "offseason");
+
   if (year.year !== CURR_YEAR && matches.length === 0) {
     return (
       <div className="w-full h-auto flex flex-col justify-center items-center px-2">
@@ -188,6 +192,20 @@ const OverviewSection = ({ teamYearData }: { teamYearData: TeamYearData | undefi
           </div>
         )}
       </div>
+      {offseasonEvents.length > 0 && (
+        <div className="w-full mb-4 text-sm">
+          {offseasonEvents.map((event) => (
+            <div key={event.event}>
+              Offseason:{" "}
+              <Link href={`/event/${event.event}`} className="text_link">
+                {event.event_name}
+              </Link>{" "}
+              — EPA <strong>{event?.epa?.breakdown?.total_points?.toFixed(1)}</strong>{" "}
+              <span className="text-gray-500">(does not affect season EPA)</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="w-full h-1 bg-gray-300" />
       <div className="w-full my-4 flex flex-wrap justify-center items-center">
         <strong className="mr-2">Perspective: </strong>
