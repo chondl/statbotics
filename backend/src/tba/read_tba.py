@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, cast
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from src.tba import cache as tba_cache
 from src.tba.breakdown import clean_breakdown, post_clean_breakdown
@@ -81,10 +81,13 @@ def get_district_teams(
 
 
 def get_event_teams(
-    event: str, etag: Optional[str] = None, cache: bool = True
+    event: str,
+    etag: Optional[str] = None,
+    cache: bool = True,
+    fresh: bool = False,
 ) -> Tuple[List[int], Optional[str]]:
     query_str = "event/" + str(event) + "/teams/simple"
-    data, new_etag = get_tba(query_str, etag=etag, cache=cache)
+    data, new_etag = get_tba(query_str, etag=etag, cache=cache, fresh=fresh)
     if type(data) is bool:
         return [], new_etag
     out = [parse_team(x["key"]) for x in data]
@@ -93,24 +96,94 @@ def get_event_teams(
 
 OFFSEASON_REVALIDATION_HOURS = 24
 
+# Probe-freshness window: start-1d .. end+1d. Inside it, rosters and
+# schedules change hour to hour (day-of imports), so probes always refetch.
+PROBE_WINDOW_BEFORE_DAYS = 1
+PROBE_WINDOW_AFTER_DAYS = 1
 
-def _probe_cache(url: str, cache: bool, tier_probes: bool) -> bool:
-    """Freshness tier for the offseason quality-filter probes (TBA cache
-    design §2.3). Partial cycles re-run the filters every cycle so that an
-    event which failed them earlier (empty roster, no schedule yet) can enter
-    once TBA fills in — but that must not mean two network round-trips per
-    type-99 event per cycle, so the pickle is served unless the manifest says
-    this path has gone stale.
 
-    The tier is PARTIAL-ONLY. A full cycle is an explicit "rebuild from TBA":
-    it must revalidate every probe, or a roster cached while the event was
-    still empty survives the rebuild and the event stays dropped — which is
-    exactly what happened to 2026mirr on the first deploy of this code."""
-    if cache:
-        return True
-    if not tier_probes:
+def _in_probe_window(start_date: str, end_date: str) -> bool:
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
         return False
-    return not tba_cache.needs_revalidation(url, OFFSEASON_REVALIDATION_HOURS)
+    now = datetime.now()
+    return (
+        start - timedelta(days=PROBE_WINDOW_BEFORE_DAYS)
+        <= now
+        <= end + timedelta(days=PROBE_WINDOW_AFTER_DAYS + 1)
+    )
+
+
+def _probe_mode(
+    url: str, cache: bool, tier_probes: bool, in_window: bool
+) -> Tuple[bool, bool]:
+    """(cache, fresh) for one offseason quality-filter probe.
+
+    Freshness tier (TBA cache design §2.3): partial cycles re-run the filters
+    every cycle so that an event which failed them earlier (empty roster, no
+    schedule yet) can enter once TBA fills in — but that must not mean two
+    network round-trips per type-99 event per cycle, so the pickle is served
+    unless the manifest says this path has gone stale. A full cycle is an
+    explicit "rebuild from TBA": it must refetch every probe, or a roster
+    cached while the event was still empty survives the rebuild and the event
+    stays dropped (2026mirr, first deploy of the filters).
+
+    Any probe that does go to the network goes UNCONDITIONALLY — never with
+    If-None-Match. TBA's etags are not content fingerprints: 2026wvrox's
+    roster went 0 -> 30 teams with no etag change, so a conditional
+    revalidation 304'd and re-served the empty pickle on every cycle, keeping
+    the event dropped forever. Events inside their date window skip the tier
+    entirely and refetch every cycle (day-of roster/schedule imports)."""
+    if in_window:
+        return False, True
+    if cache:
+        return True, False
+    if tier_probes and not tba_cache.needs_revalidation(
+        url, OFFSEASON_REVALIDATION_HOURS
+    ):
+        return True, False
+    return False, True
+
+
+def get_raw_offseason_events(year: int) -> List[Dict[str, Any]]:
+    """Raw TBA event dicts for the type-99 events subject to the offseason
+    quality filters, served from the cached events-list pickle (no network
+    when the pickle exists). Used by check_year_partial to watch events that
+    were dropped by the filters — nothing else re-evaluates them, because a
+    roster or schedule filling in moves neither the year's events-list etag
+    nor any etag the gate otherwise checks."""
+    if year < 2025:
+        return []
+    data, _ = get_tba("events/" + str(year), etag=None, cache=True)
+    if type(data) is bool:
+        return []
+    out: List[Dict[str, Any]] = []
+    for event in data:
+        key = event["key"]
+        if "tempclone" in key or key in EVENT_BLACKLIST:
+            continue
+        if int(event["event_type"]) != 99 or key in EVENT_TYPE_OVERRIDES:
+            continue
+        out.append(event)
+    return out
+
+
+def probe_offseason_event(key: str) -> Tuple[List[int], int]:
+    """Fresh (unconditional — see _probe_mode on why never conditional)
+    quality-filter probe for one offseason event: (parsed team ids, raw
+    match count). Broken data reads as not viable."""
+    try:
+        teams = get_event_teams(key, etag=None, cache=False, fresh=True)[0]
+        matches = get_tba(
+            "event/" + key + "/matches", etag=None, cache=False, fresh=True
+        )[0]
+        if type(matches) is bool:
+            return teams, 0
+        return teams, len(matches)
+    except Exception:
+        return [], 0
 
 
 def get_events(
@@ -144,8 +217,12 @@ def get_events(
             try:
                 teams_path = f"event/{key}/teams/simple"
                 matches_path = f"event/{key}/matches"
+                in_window = _in_probe_window(event["start_date"], event["end_date"])
+                teams_cache, teams_fresh = _probe_mode(
+                    teams_path, cache, tier_probes, in_window
+                )
                 event_teams = get_event_teams(
-                    key, etag=None, cache=_probe_cache(teams_path, cache, tier_probes)
+                    key, etag=None, cache=teams_cache, fresh=teams_fresh
                 )[0]
                 # remove events with less than 6 teams
                 if len(event_teams) < 6:
@@ -158,10 +235,14 @@ def get_events(
                 # regardless. Stripping them here is not an option either:
                 # get_event_matches drops any alliance with <3 teams, so
                 # removing a demo team would delete the real match with it.
+                matches_cache, matches_fresh = _probe_mode(
+                    matches_path, cache, tier_probes, in_window
+                )
                 matches = get_tba(
                     matches_path,
                     etag=None,
-                    cache=_probe_cache(matches_path, cache, tier_probes),
+                    cache=matches_cache,
+                    fresh=matches_fresh,
                 )[0]
                 end_date = datetime.strptime(event["end_date"], "%Y-%m-%d")
                 if len(matches) == 0 and (datetime.now() - end_date).days >= 1:  # type: ignore

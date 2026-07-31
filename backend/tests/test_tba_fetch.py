@@ -114,6 +114,9 @@ def test_check_year_partial_alliances_uses_alliances_etag(monkeypatch):
     monkeypatch.setattr(data_tba, "get_event_matches_tba", fake_matches)
     monkeypatch.setattr(data_tba, "get_event_rankings_tba", fake_rankings)
     monkeypatch.setattr(data_tba, "get_event_alliances_tba", fake_alliances)
+    # Hermetic: the dropped-offseason candidate sweep would read real cache
+    # state / hit TBA.
+    monkeypatch.setattr(data_tba, "get_raw_offseason_events_tba", lambda year: [])
 
     changed = data_tba.check_year_partial(2026, [_mk_event(key)], etags)
 

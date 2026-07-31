@@ -7,18 +7,17 @@ from src.db.models import ETag, Event, Team, TeamEvent, TeamYear, match_dict_to_
 from src.tba import cache as tba_cache
 from src.tba.clean_data import format_team
 from src.tba.constants import DISTRICT_MAPPING
-from src.tba.read_tba import (
-    EventDict,
-    MatchDict,
-    get_district_teams as get_district_teams_tba,
-    get_districts as get_districts_tba,
-    get_event_alliances as get_event_alliances_tba,
-    get_event_matches as get_event_matches_tba,
-    get_event_rankings as get_event_rankings_tba,
-    get_event_teams as get_event_teams_tba,
-    get_events as get_events_tba,
-    get_teams as get_teams_tba,
-)
+from src.tba.read_tba import EventDict, MatchDict
+from src.tba.read_tba import get_district_teams as get_district_teams_tba
+from src.tba.read_tba import get_districts as get_districts_tba
+from src.tba.read_tba import get_event_alliances as get_event_alliances_tba
+from src.tba.read_tba import get_event_matches as get_event_matches_tba
+from src.tba.read_tba import get_event_rankings as get_event_rankings_tba
+from src.tba.read_tba import get_event_teams as get_event_teams_tba
+from src.tba.read_tba import get_events as get_events_tba
+from src.tba.read_tba import get_raw_offseason_events as get_raw_offseason_events_tba
+from src.tba.read_tba import get_teams as get_teams_tba
+from src.tba.read_tba import probe_offseason_event as probe_offseason_event_tba
 from src.types.enums import CompLevel, EventStatus, MatchStatus, MatchWinner
 from src.utils.utils import get_team_event_key, get_team_year_key
 
@@ -158,6 +157,31 @@ def check_year_partial(
         _, new_etag = get_event_alliances_tba(event_obj.key, prev_etag, cache=False)
         if new_etag != prev_etag and new_etag is not None:
             return True  # If any event has new alliances, return True
+
+    # Offseason events dropped by the quality filters are invisible to every
+    # check above: they are not in event_objs, and a roster or schedule
+    # filling in does not move the year's events-list etag. Without this
+    # block, such an event only re-enters when something unrelated fires the
+    # gate (2026wvrox went live and stayed missing all day). Probe in-window
+    # candidates FRESH — TBA etags are not content fingerprints, see
+    # read_tba._probe_mode — and escalate once one would pass the filters.
+    ingested = {event_obj.key for event_obj in event_objs}
+    today = datetime.now().strftime("%Y-%m-%d")
+    for raw_event in get_raw_offseason_events_tba(year_num):
+        key = raw_event["key"]
+        if key in ingested:
+            continue
+        if not in_event_window(raw_event["start_date"], raw_event["end_date"], today):
+            continue
+        teams, num_matches = probe_offseason_event_tba(key)
+        if len(teams) < 6:
+            continue
+        # Mirror get_events' matchless-past drop: escalating for an event the
+        # filters would still reject would loop a full recompute every cycle.
+        end_date = datetime.strptime(raw_event["end_date"], "%Y-%m-%d")
+        if num_matches == 0 and (datetime.now() - end_date).days >= 1:
+            continue
+        return True  # A dropped offseason event would now pass the filters
 
     return False  # Otherwise return False
 

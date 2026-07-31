@@ -207,6 +207,22 @@ the event list with `revalidate=True`: on the explicit-etag path a 304 makes
 before its roster went up could never re-enter. The per-event probes are tiered
 (`OFFSEASON_REVALIDATION_HOURS`) to keep that cheap.
 
+> **Gotcha — TBA ETags are NOT content fingerprints.** 2026wvrox's roster went
+> 0 → 30 teams on event morning with **no change to the `teams/simple` etag**:
+> a conditional GET against the stored etag 304'd forever while the pickled
+> roster stayed empty, so the `<6 teams` filter dropped the live event on every
+> cycle with no path back (2026txdri1 and 2026vagle2 hit the same trap the
+> same day). Two consequences, both in code now:
+> 1. Quality-filter probes **never send If-None-Match** (`_probe_mode` in
+>    `read_tba.py`): they serve a tier-fresh pickle or refetch unconditionally
+>    (`get_tba(..., fresh=True)`). Events inside start−1d..end+1d probe fresh
+>    every cycle.
+> 2. `check_year_partial` ends with a **dropped-candidate sweep**: in-window
+>    type-99 events absent from `event_objs` are probed fresh, and the gate
+>    escalates when one would now pass the filters — nothing else can trigger
+>    a recompute for an event the mirror never ingested (its match etags are
+>    unchecked, the events-list etag doesn't move, and no page exists to ping).
+
 ## Season Prep
 
 Update these at the start of each new season:
