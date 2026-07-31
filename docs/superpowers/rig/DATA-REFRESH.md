@@ -104,13 +104,18 @@ every few minutes around the clock.
 ### The shared gate
 
 `check_year_partial` ([`backend/src/data/tba.py`](../../../backend/src/data/tba.py))
-does an etag-only TBA check and returns a boolean — it fetches nothing into the DB
+does a cheap TBA check and returns a boolean — it fetches nothing into the DB
 and computes no EPA. It checks the `{year}/events` list etag first, then, for each
 non-completed event inside its date window, the `/matches`, `/rankings`, and
-`/alliances` etags. If nothing changed, the gate returns `{"skipped"}` and no
-recompute happens — so a ping (or cron tick) over unchanged TBA data is nearly
-free. Only a real change escalates to `GET /v3/data/update_curr_year`, the heavy
-`process_year` cycle.
+`/alliances` etags. Finally it sweeps **dropped offseason candidates**: type-99
+events on TBA that the quality filters kept out of the mirror, currently inside
+their date window, get their roster/schedule probed with **unconditional** GETs
+(TBA etags are not content fingerprints — the 2026wvrox incident; see
+`backend/CLAUDE.md` → offseason filters gotcha), and the gate escalates when one
+would now pass the filters. If nothing changed, the gate returns `{"skipped"}`
+and no recompute happens — so a ping (or cron tick) over unchanged TBA data is
+nearly free. Only a real change escalates to `GET /v3/data/update_curr_year`,
+the heavy `process_year` cycle.
 
 ## 4. New events are ingested automatically
 
@@ -118,8 +123,11 @@ A genuinely new event appearing on TBA changes the `{year}/events` list etag.
 `check_year_partial`'s first check catches that (`if new_etag != prev_etag: return
 True # If any new events`), and the partial `process_year` re-fetches the events
 list and upserts the new event, then pulls its matches if today falls in the
-event window. **The hourly cron picks up new offseason events on its own** — no
-manual step required.
+event window. An offseason event that was on TBA but **dropped by the quality
+filters** (empty roster) re-enters through the gate's dropped-candidate sweep
+once its roster fills and its date window opens — its probes are refetched
+unconditionally, never trusting a 304. **The hourly cron picks up new and
+late-filling offseason events on its own** — no manual step required.
 
 The one exception is a **post-deploy backfill**: if you ship new ingest logic for
 events that were *already on TBA* before the deploy, their etags are unchanged, so

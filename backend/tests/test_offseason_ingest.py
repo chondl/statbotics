@@ -40,9 +40,9 @@ def mk_match(red, blue):
 def patch_tba(monkeypatch, events, extra=None, calls=None):
     payloads = {f"events/{YEAR}": events, "events/2024": events, **(extra or {})}
 
-    def _get(path, etag=None, cache=True):
+    def _get(path, etag=None, cache=True, fresh=False):
         if calls is not None:
-            calls.append((path, etag, cache))
+            calls.append((path, etag, cache, fresh))
         return payloads.get(path, []), None
 
     monkeypatch.setattr(rt, "get_tba", _get)
@@ -201,7 +201,7 @@ def _probe_flags(monkeypatch, key="2026tier", tier_probes=True):
         calls=calls,
     )
     rt.get_events(YEAR, cache=False, tier_probes=tier_probes)
-    return {path: cache for path, _etag, cache in calls if key in path}
+    return {path: cache for path, _etag, cache, _fresh in calls if key in path}
 
 
 def test_fresh_offseason_probes_serve_the_pickle(monkeypatch):
@@ -248,7 +248,7 @@ def test_full_cycle_probes_keep_plain_cache(monkeypatch):
         calls=calls,
     )
     rt.get_events(YEAR, cache=True)
-    flags = {p: c for p, _e, c in calls if key in p}
+    flags = {p: c for p, _e, c, _f in calls if key in p}
     assert flags[f"event/{key}/teams/simple"] is True
 
 

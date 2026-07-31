@@ -36,12 +36,16 @@ def _get_tba(
 
 
 def get_tba(
-    url: str, etag: Optional[str] = None, cache: bool = True
+    url: str, etag: Optional[str] = None, cache: bool = True, fresh: bool = False
 ) -> Tuple[Union[Any, bool], Optional[str]]:
     cache_path = os.path.join(TBA_CACHE_DIR, url)
     # REFRESH_TBA (design §2.3): bypass every cache/etag layer — the fetch is
     # unconditional and the 200 below rebuilds the pickle + manifest state.
-    force = tba_cache.force_refresh()
+    # fresh=True is the per-call equivalent, for paths where TBA's etags
+    # cannot be trusted as content fingerprints (2026wvrox: a roster went
+    # 0 -> 30 teams without the teams/simple etag changing, so conditional
+    # revalidation 304'd against stale data forever).
+    force = tba_cache.force_refresh() or fresh
     has_pickle = os.path.exists(cache_path + "/data.p")
     if cache and has_pickle and not force:
         # Cache Hit: no network, no manifest change

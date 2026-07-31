@@ -19,13 +19,7 @@ import src.tba.main as tba_main
 from src.constants import CURR_YEAR
 from src.db.models import ETag, Event, Year
 from src.tba.types import empty_breakdown
-from src.types.enums import (
-    CompLevel,
-    EventStatus,
-    EventType,
-    MatchStatus,
-    MatchWinner,
-)
+from src.types.enums import CompLevel, EventStatus, EventType, MatchStatus, MatchWinner
 
 """
 1. Active-window math (design §2.3): start−1d .. end+3d
@@ -78,6 +72,9 @@ def _patch_probe_fakes(monkeypatch, calls):
 
     monkeypatch.setattr(data_tba, "get_events_tba", fake_events)
     monkeypatch.setattr(data_tba, "get_event_matches_tba", fake_matches)
+    # Keep the dropped-offseason candidate sweep out of these etag-focused
+    # tests (it would otherwise read real cache state / hit TBA).
+    monkeypatch.setattr(data_tba, "get_raw_offseason_events_tba", lambda year: [])
 
 
 def test_check_year_partial_probes_through_end_grace(monkeypatch):
