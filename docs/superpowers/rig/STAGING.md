@@ -78,11 +78,10 @@ db-less `reset_all_years` — see
 
 ## Secrets
 
-- Env-first everywhere: the deploy tooling reads each secret from its
-  environment variable when set, falling back to the Mac's chmod-600 home-dir
-  files only when the variable is unset. The full variable/file table is in
-  [DEPLOY.md](deploy/DEPLOY.md) §9. (`~/statbotics_staging_secret.txt` is
-  retired — it held the DB password, and the DB is gone.)
+- Environment variables only: the deploy tooling reads each secret exclusively
+  from its environment variable, injected from the operator's Keychain-backed
+  environment. Home-directory secret files are fully retired. The variable
+  table is in [DEPLOY.md](deploy/DEPLOY.md) §9.
 - Secret Manager: `tba-auth-key`. (`db-password` was deleted with Cloud SQL on
   2026-07-27.)
 - The backend gets `TBA_AUTH_KEY` (from `tba-auth-key`). Never echo it.

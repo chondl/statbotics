@@ -16,9 +16,10 @@ Live staging instance of statbotics with the workstream's fixes, on GCP project
 | Backend run.app | https://statbotics-api-630091002690.us-central1.run.app |
 | Frontend run.app | https://statbotics-web-630091002690.us-central1.run.app |
 
-All `gcloud` commands below use `--project=statbotics-staging`. Secrets live in
-`/Users/chondl/statbotics_staging_secret.txt` (chmod 600, untracked) and GCP
-Secret Manager — never printed here or in any tracked file.
+All `gcloud` commands below use `--project=statbotics-staging`. Secrets are
+provided as environment variables from the operator's Keychain-backed
+environment, plus GCP Secret Manager — never printed here or in any tracked
+file.
 
 Reproducible redeploy: `docs/superpowers/rig/deploy/deploy.sh` (parameterized) +
 `docs/superpowers/rig/deploy/DEPLOY.md` (architecture, cloud-agnostic + GCP + AWS
@@ -303,7 +304,7 @@ the merge intact.
 |----------|------|------|------------------------|
 | GCS bucket | Standard | `statbotics-staging-site` | us-central1, uniform access, `allUsers` objectViewer (public read), CORS for the staging origin; ~75 MB, ~8.2k objects |
 | Artifact Registry | docker repo | `statbotics` | us-central1; holds `statbotics-api`, `statbotics-web` images |
-| Secret Manager | secret | `tba-auth-key` | TBA API key (real key from `~/thebluealliance_api_key.txt`) |
+| Secret Manager | secret | `tba-auth-key` | TBA API key (real key from `$TBA_AUTH_KEY`) |
 | Cloud Run svc | service | `statbotics-api` | us-central1, image `statbotics-api:latest`, **cpu 2 / mem 8Gi**, min 0 / max 2, `PROD=True`, `GCS_BUCKET`, **`API_BACKEND=duckdb`**, `TBA_AUTH_KEY` from secret, timeout 3600 |
 | Cloud Run svc | service | `statbotics-web` | us-central1, image `statbotics-web:latest`, cpu 1 / mem 1Gi, min 0 / max 2, `next start` |
 | Cloud Scheduler | http job | `statbotics-update` | us-central1, `0 * * * *`, GET `…/v3/site/update_curr_year`, deadline 1800s |
@@ -433,17 +434,14 @@ gcloud --project=$P storage rm --recursive gs://statbotics-staging-db-final-expo
 gcloud --project=$P secrets delete tba-auth-key --quiet
 # Artifact Registry (removes both images)
 gcloud --project=$P artifacts repositories delete statbotics --location=$R --quiet
-# Cloudflare (needs the token from ~/iterativerefinement_secret.txt; zone id via API):
+# Cloudflare (needs $CLOUDFLARE_API_TOKEN from the environment; zone id via API):
 #   delete Worker scripts `statbotics-proxy` + `statbotics-blob-proxy`, their 3
 #   routes, and the 3 AAAA records (statbotics, api-statbotics, blobs-statbotics).
 #   See docs/superpowers/rig/deploy/DEPLOY.md.
-# Local secret file:
-rm -f ~/statbotics_staging_secret.txt
 ```
 
 Fastest full teardown: `gcloud projects delete statbotics-staging` (removes every
-GCP resource at once), then delete the Cloudflare Worker/routes/DNS and the local
-secret file.
+GCP resource at once), then delete the Cloudflare Worker/routes/DNS.
 
 ---
 

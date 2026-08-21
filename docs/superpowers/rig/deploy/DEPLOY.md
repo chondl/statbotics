@@ -265,27 +265,26 @@ hostnames would break.
 | Cloud Build | **CodeBuild** / local docker build | Frontend still needs the `BACKEND_URL`/`BUCKET_URL` build-args. |
 | Cloudflare Worker | **CloudFront + ACM** (or keep Cloudflare) | Distribution with the App Runner/ALB origin + ACM cert. |
 
-## 9. Secrets (env-first, never committed, never printed)
+## 9. Secrets (environment variables only, never committed, never printed)
 
-Every secret is resolved **environment-variable first**; only when the variable
-is unset does the tooling fall back to the corresponding Mac home-directory
-file. A missing secret fails naming the **variable** — in agent containers the
-files do not exist and the values arrive only as env vars, while on the Mac
-`~/.zshrc.local` sources the (chmod 600, untracked) files below.
+Every secret is read **only from its environment variable**. The canonical
+store is the operator's macOS Keychain; the values are injected into the shell
+environment at start (on the Mac and in agent containers alike). Home-directory
+secret files are fully retired — there is no file fallback anywhere in the
+tooling. A missing secret fails fast naming the **variable** and pointing at
+the operator's environment.
 
-| Env var | Mac fallback file (`KEY=VALUE` lines) | Used by |
-|---|---|---|
-| `TBA_AUTH_KEY` | `~/thebluealliance_api_key.txt` (`X-TBA-Auth-Key=<value>`) | `deploy.sh secrets` (writes it to Secret Manager) |
-| `CLOUDFLARE_API_TOKEN` | `~/iterativerefinement_secret.txt` | `deploy.sh dns` (Cloudflare acct #1) |
-| `CLOUDFLARE_ACCOUNT_ID` | `~/iterativerefinement_secret.txt` | `deploy.sh dns` |
-| `POPCORNPENGUINS_CLOUDFLARE_API_TOKEN` | `~/popcornpenguins_secret.txt` (`CLOUDFLARE_API_TOKEN=` line) | `deploy.sh dns-pp` (Cloudflare acct #2) |
-| `POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID` | `~/popcornpenguins_secret.txt` (`CLOUDFLARE_ACCOUNT_ID=` line) | `deploy.sh dns-pp` |
+| Env var | Used by |
+|---|---|
+| `TBA_AUTH_KEY` | `deploy.sh secrets` (writes it to Secret Manager); rig scripts via `rig_bootstrap.py` |
+| `CLOUDFLARE_API_TOKEN` | `deploy.sh dns` (Cloudflare acct #1, zone iterativerefinement.com) |
+| `CLOUDFLARE_ACCOUNT_ID` | `deploy.sh dns` |
+| `POPCORNPENGUINS_CLOUDFLARE_API_TOKEN` | `deploy.sh dns-pp` (Cloudflare acct #2, zone popcornpenguins.com) |
+| `POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID` | `deploy.sh dns-pp` |
 
 Routine `make ship` needs **none** of these — only `gcloud` auth. The
 Cloudflare tokens are needed only when (re)running the `dns`/`dns-pp` steps,
-and `TBA_AUTH_KEY` only when (re)creating the Secret Manager entry. The
-`~/statbotics_staging_secret.txt` file is retired (it held the DB password;
-the DB is gone).
+and `TBA_AUTH_KEY` only when (re)creating the Secret Manager entry.
 
 All account-specific values are variables at the top of `deploy.sh` and the
 Makefile; override via env to target a different project/domain.

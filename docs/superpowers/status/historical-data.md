@@ -11,9 +11,9 @@ backfill hist/ blobs, verify live, and write the maintainer deliverable.
 - Backend code: `.worktrees/staging/backend` (branch `staging`), run with the rig
   venv python `.worktrees/rig/backend/.venv/bin/python` (has psycopg2 2.9.10,
   sqlalchemy 2.0.40, google-cloud-storage). `PYTHONPATH` + CWD = staging backend.
-- Secrets from `/Users/chondl/statbotics_staging_secret.txt` (never printed):
-  `DATABASE_URL=postgresql+psycopg2://<user>:<pwd>@127.0.0.1:5433/<db>`. TBA key
-  from `/Users/chondl/thebluealliance_api_key.txt` → `TBA_AUTH_KEY` env.
+- Secrets from environment variables (never printed):
+  `DATABASE_URL=postgresql+psycopg2://<user>:<pwd>@127.0.0.1:5433/<db>`
+  (DB era, since retired) and `TBA_AUTH_KEY`.
 
 ## Pre-build DB state (verified)
 Only 2026 present: years=1, teams=3724, team_years=3724 (2026), events=215,

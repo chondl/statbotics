@@ -58,7 +58,7 @@ Format/lint: black, isort, flake8 all clean on touched files.
 
 ## Rig resources reused
 - TBA auth: hardcoded AUTH_KEY in src/tba/constants.py (== frontend public key) works; for the
-  verification build used the real key at /Users/chondl/thebluealliance_api_key.txt via a
+  verification build used the real key from `$TBA_AUTH_KEY` via a
   runtime session-header override in a scratchpad seed script (NOT committed; branch does not
   touch TBA). fake-gcs + rig.env pattern reused (DATABASE_URL added).
 </content>
