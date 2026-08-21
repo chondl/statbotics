@@ -15,7 +15,10 @@ Statbotics is an open-source data analytics platform for the FIRST Robotics Comp
 
 ## Deploying & operating the staging mirror
 
-This fork is deployed as a live mirror at **statbotics.iterativerefinement.com**.
+This fork is deployed as a live mirror at **statbotics.iterativerefinement.com**
+and **statbotics.popcornpenguins.com** — same code and commit on both, one
+shared backend, one frontend Cloud Run service per domain (each domain's
+Cloudflare account proxies it).
 **You are on `cph-staging` — the fork branch that runs production** (the mirror),
 and **all work happens on this branch by default. This is the primary checkout at
 the repository root.** The only exception is preparing a minimal PR back to the
@@ -35,7 +38,8 @@ see [`docs/superpowers/rig/DATA-REFRESH.md`](docs/superpowers/rig/DATA-REFRESH.m
 > **`make ship` is the ONLY way to deploy. Every deploy is identical.** Never
 > `gcloud builds submit` / `gcloud run deploy` by hand, and never build or roll
 > a single service because "only the backend changed" — `make ship` always
-> builds both images and rolls both services. The component targets
+> builds all images and rolls all services (backend + one frontend per mirror
+> domain). The component targets
 > (`build-api`, `deploy-api`, …) are guarded and will refuse to run outside
 > `make ship`; a deliberate partial deploy requires an explicit
 > `ALLOW_PARTIAL=1` and a reason. Do not reason your way to a shortcut because

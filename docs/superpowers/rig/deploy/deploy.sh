@@ -3,9 +3,20 @@
 # Reproducible staging deploy for statbotics on Google Cloud.
 #
 # Deploys the whole stack: GCS bucket + backend Cloud Run service + seed Cloud
-# Run job + frontend Cloud Run service + Cloud Scheduler + Cloudflare DNS/Worker.
+# Run job + frontend Cloud Run services + Cloud Scheduler + Cloudflare DNS/Worker.
 # Idempotent-ish: safe to re-run; most `create` steps are guarded and fall back
 # to `update`.
+#
+# TWO FRONTEND MIRRORS, ONE BACKEND. The stack serves two domains:
+#   - statbotics.iterativerefinement.com  (Cloud Run `statbotics-web`,
+#     Cloudflare account #1 / zone iterativerefinement.com)
+#   - statbotics.popcornpenguins.com      (Cloud Run `statbotics-web-pp`,
+#     Cloudflare account #2 / zone popcornpenguins.com)
+# Both frontends are built from the SAME code at the SAME commit; they differ
+# only in the BACKEND_URL/BUCKET_URL build args (inlined at `next build` time),
+# which point each mirror at its own domain's api-/blobs- hostnames. The
+# backend Cloud Run service, GCS bucket, seed job, and schedulers are shared —
+# each Cloudflare zone's api-/blobs- hostnames proxy the same origins.
 #
 # NO DATABASE. DB retirement Phase 4 completed 2026-07-27: the Cloud SQL
 # instance, the `db-password` secret, the `cloudsql.client` IAM grant, and the
@@ -15,27 +26,37 @@
 # gs://statbotics-staging-db-final-export/ (private).
 #
 # Every account-specific value is a variable (see CONFIG). No secrets are baked
-# in — the TBA key is read from a file and written to Secret Manager, never
-# echoed.
+# in and none are ever echoed.
+#
+# SECRETS ARE ENV-FIRST. Each secret is read from its environment variable
+# when set; only when the variable is unset does the script fall back to the
+# corresponding Mac home-directory file. A missing secret fails naming the
+# VARIABLE (agent containers have only env vars — the files exist only on the
+# Mac, where ~/.zshrc.local sources them). Variables:
+#   TBA_AUTH_KEY                          (file: ~/thebluealliance_api_key.txt)
+#   CLOUDFLARE_API_TOKEN                  (file: ~/iterativerefinement_secret.txt)
+#   CLOUDFLARE_ACCOUNT_ID                 (file: ~/iterativerefinement_secret.txt)
+#   POPCORNPENGUINS_CLOUDFLARE_API_TOKEN  (file: ~/popcornpenguins_secret.txt)
+#   POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID (file: ~/popcornpenguins_secret.txt)
 #
 # Prereqs on the operator machine:
 #   - gcloud authenticated (gcloud auth login) with rights to the target project
 #   - a billing account linked to the project
 #   - curl, python3, git
-#   - a TBA API key file (format: X-TBA-Auth-Key=<value>)
-#   - a Cloudflare API token + account id + a zone you control (for DNS)
+#   - the secrets above (env vars, or the Mac fallback files)
 #
 # Usage:
 #   Edit the CONFIG block (or export the vars), then:
 #     ./deploy.sh apis         # enable APIs
 #     ./deploy.sh bucket       # create public GCS bucket + CORS
 #     ./deploy.sh secrets      # create Secret Manager entries + IAM
-#     ./deploy.sh images       # build backend + frontend images
+#     ./deploy.sh images       # build backend + both frontend images
 #     ./deploy.sh backend      # deploy backend Cloud Run service
 #     ./deploy.sh seed         # create + run the schema/seed job
-#     ./deploy.sh frontend     # deploy frontend Cloud Run service
+#     ./deploy.sh frontend     # deploy both frontend Cloud Run services
 #     ./deploy.sh scheduler    # hourly update job
-#     ./deploy.sh dns          # Cloudflare DNS records + reverse-proxy worker
+#     ./deploy.sh dns          # Cloudflare acct #1: iterativerefinement.com records + workers
+#     ./deploy.sh dns-pp       # Cloudflare acct #2: popcornpenguins.com records + workers
 #     ./deploy.sh all          # everything, in order
 #
 set -euo pipefail
@@ -53,6 +74,7 @@ AR_REPO="${AR_REPO:-statbotics}"
 # Cloud Run
 API_SERVICE="${API_SERVICE:-statbotics-api}"
 WEB_SERVICE="${WEB_SERVICE:-statbotics-web}"
+WEB_PP_SERVICE="${WEB_PP_SERVICE:-statbotics-web-pp}"
 SEED_JOB="${SEED_JOB:-statbotics-seed}"
 API_MEMORY="${API_MEMORY:-8Gi}"            # full-stack cycle in the serving container: EPA replay + cycle-start deepcopy + snapshot(24MB) + Parquet serialization + DuckDB cache. Measured peaks: 2Gi OOM @2055MiB, 4Gi OOM @4166MiB. 8Gi (needs >=2 CPU) clears it.
 API_CPU="${API_CPU:-2}"                     # 8Gi memory on Cloud Run requires >=2 vCPU
@@ -61,32 +83,59 @@ WEB_CPU="${WEB_CPU:-1}"
 SEED_MEMORY="${SEED_MEMORY:-4Gi}"
 MAX_INSTANCES="${MAX_INSTANCES:-2}"
 
-# Domains (must be inside the Cloudflare zone below)
+# Domains, Cloudflare account #1 (zone iterativerefinement.com)
 FRONTEND_DOMAIN="${FRONTEND_DOMAIN:-statbotics.iterativerefinement.com}"
 API_DOMAIN="${API_DOMAIN:-api-statbotics.iterativerefinement.com}"
 # Cloudflare-proxied hostname for the public blob bucket (edge-cached, so the
 # frontend reads blobs through the CDN instead of straight from GCS).
 BLOB_DOMAIN="${BLOB_DOMAIN:-blobs-statbotics.iterativerefinement.com}"
 
+# Domains, Cloudflare account #2 (zone popcornpenguins.com). Same hostname
+# pattern; api-/blobs- proxy the SAME backend service and bucket as account #1.
+PP_FRONTEND_DOMAIN="${PP_FRONTEND_DOMAIN:-statbotics.popcornpenguins.com}"
+PP_API_DOMAIN="${PP_API_DOMAIN:-api-statbotics.popcornpenguins.com}"
+PP_BLOB_DOMAIN="${PP_BLOB_DOMAIN:-blobs-statbotics.popcornpenguins.com}"
+
 # Source tree (the merged `staging` branch checkout)
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 BACKEND_DIR="${BACKEND_DIR:-$REPO_DIR/backend}"
 FRONTEND_DIR="${FRONTEND_DIR:-$REPO_DIR/frontend}"
 
-# Secret inputs (never printed)
+# Secret inputs — env-first; the files are the Mac fallback (never printed).
 TBA_KEY_FILE="${TBA_KEY_FILE:-$HOME/thebluealliance_api_key.txt}"   # X-TBA-Auth-Key=<value>
-STAGING_SECRET_FILE="${STAGING_SECRET_FILE:-$HOME/statbotics_staging_secret.txt}"
 
-# Cloudflare (token + account read from a KEY=VALUE file; never printed)
+# Cloudflare account #1 (iterativerefinement.com)
 CF_SECRET_FILE="${CF_SECRET_FILE:-$HOME/iterativerefinement_secret.txt}"
 CF_ZONE_NAME="${CF_ZONE_NAME:-iterativerefinement.com}"
+# Cloudflare account #2 (popcornpenguins.com)
+PP_CF_SECRET_FILE="${PP_CF_SECRET_FILE:-$HOME/popcornpenguins_secret.txt}"
+PP_CF_ZONE_NAME="${PP_CF_ZONE_NAME:-popcornpenguins.com}"
+# Worker script names are per-account, so both accounts can use the same names.
 WORKER_NAME="${WORKER_NAME:-statbotics-proxy}"
 BLOB_WORKER_NAME="${BLOB_WORKER_NAME:-statbotics-blob-proxy}"
 
 IMAGE_API="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$API_SERVICE:latest"
 IMAGE_WEB="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$WEB_SERVICE:latest"
+IMAGE_WEB_PP="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$WEB_PP_SERVICE:latest"
 
 gc() { gcloud --project="$PROJECT_ID" "$@"; }
+
+# resolve_secret VAR FILE KEY — print the secret: $VAR from the environment
+# when set, else the value of the `KEY=` line in FILE when that file exists.
+# Fails naming the VARIABLE (not the file): agent containers have only env
+# vars, so "set $VAR" is always the actionable message.
+resolve_secret() {
+  local var="$1" file="$2" key="$3" val
+  val="${!var:-}"
+  if [ -z "$val" ] && [ -f "$file" ]; then
+    val="$(grep "^$key=" "$file" | head -1 | cut -d= -f2-)"
+  fi
+  if [ -z "$val" ]; then
+    echo "ERROR: secret \$$var is not set. Export $var (or, on the Mac, provide a $key= line in $file)." >&2
+    return 1
+  fi
+  printf '%s' "$val"
+}
 
 # ------------------------------- STEPS ---------------------------------------
 
@@ -104,7 +153,7 @@ step_bucket() {
     --member=allUsers --role=roles/storage.objectViewer
   local cors; cors="$(mktemp)"
   cat > "$cors" <<EOF
-[{"origin":["https://$FRONTEND_DOMAIN","http://localhost:3000"],
+[{"origin":["https://$FRONTEND_DOMAIN","https://$PP_FRONTEND_DOMAIN","http://localhost:3000"],
   "responseHeader":["Content-Type","Cache-Control"],
   "method":["GET","HEAD","OPTIONS"],"maxAgeSeconds":3600}]
 EOF
@@ -113,7 +162,7 @@ EOF
 }
 
 step_secrets() {
-  local tba; tba="$(grep -o '=.*' "$TBA_KEY_FILE" | head -1 | cut -c2-)"
+  local tba; tba="$(resolve_secret TBA_AUTH_KEY "$TBA_KEY_FILE" X-TBA-Auth-Key)"
   printf '%s' "$tba" | gc secrets create tba-auth-key --data-file=- --replication-policy=automatic 2>/dev/null \
     || printf '%s' "$tba" | gc secrets versions add tba-auth-key --data-file=-
   gc artifacts repositories create "$AR_REPO" --repository-format=docker \
@@ -128,21 +177,30 @@ step_secrets() {
     --member="serviceAccount:$sa" --role=roles/storage.objectAdmin
 }
 
-step_images() {
-  ( cd "$BACKEND_DIR" && gc builds submit --tag "$IMAGE_API" --timeout=1200 . )
+# build_web_image IMAGE API_DOMAIN BLOB_DOMAIN — one frontend image per mirror:
+# BACKEND_URL/BUCKET_URL are inlined into the JS bundle at `next build` time,
+# so each domain needs its own build of the same code.
+build_web_image() {
+  local image="$1" api_domain="$2" blob_domain="$3"
   local cfg; cfg="$(mktemp).yaml"
   cat > "$cfg" <<EOF
 steps:
   - name: gcr.io/cloud-builders/docker
     args: [build,
-      --build-arg=BACKEND_URL=https://$API_DOMAIN/v3/site,
-      --build-arg=BUCKET_URL=https://$BLOB_DOMAIN,
-      --build-arg=PROD=True, -t, $IMAGE_WEB, .]
-images: [$IMAGE_WEB]
+      --build-arg=BACKEND_URL=https://$api_domain/v3/site,
+      --build-arg=BUCKET_URL=https://$blob_domain,
+      --build-arg=PROD=True, -t, $image, .]
+images: [$image]
 options: {machineType: E2_HIGHCPU_8}
 EOF
   ( cd "$FRONTEND_DIR" && gc builds submit --config="$cfg" --timeout=1800 . )
   rm -f "$cfg"
+}
+
+step_images() {
+  ( cd "$BACKEND_DIR" && gc builds submit --tag "$IMAGE_API" --timeout=1200 . )
+  build_web_image "$IMAGE_WEB" "$API_DOMAIN" "$BLOB_DOMAIN"
+  build_web_image "$IMAGE_WEB_PP" "$PP_API_DOMAIN" "$PP_BLOB_DOMAIN"
 }
 
 # Serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb). There is no
@@ -190,11 +248,15 @@ step_seed() {
 }
 
 step_frontend() {
-  gc run deploy "$WEB_SERVICE" \
-    --image="$IMAGE_WEB" --region="$REGION" --platform=managed \
-    --allow-unauthenticated \
-    --min-instances=0 --max-instances="$MAX_INSTANCES" \
-    --cpu="$WEB_CPU" --memory="$WEB_MEMORY" --timeout=300
+  local svc image
+  for svc in "$WEB_SERVICE" "$WEB_PP_SERVICE"; do
+    [ "$svc" = "$WEB_SERVICE" ] && image="$IMAGE_WEB" || image="$IMAGE_WEB_PP"
+    gc run deploy "$svc" \
+      --image="$image" --region="$REGION" --platform=managed \
+      --allow-unauthenticated \
+      --min-instances=0 --max-instances="$MAX_INSTANCES" \
+      --cpu="$WEB_CPU" --memory="$WEB_MEMORY" --timeout=300
+  done
 }
 
 step_scheduler() {
@@ -232,18 +294,22 @@ step_scheduler() {
     2>/dev/null || true
 }
 
-step_dns() {
-  local token account zone api_host web_host
-  token="$(grep '^CLOUDFLARE_API_TOKEN=' "$CF_SECRET_FILE" | cut -d= -f2-)"
-  account="$(grep '^CLOUDFLARE_ACCOUNT_ID=' "$CF_SECRET_FILE" | cut -d= -f2-)"
+# deploy_cf_target TOKEN ACCOUNT ZONE_NAME FRONTEND_DOMAIN API_DOMAIN BLOB_DOMAIN WEB_SERVICE
+# One Cloudflare account's worth of edge config: proxied AAAA records + the
+# reverse-proxy Worker (frontend + api) + the blob-proxy Worker. Both zones use
+# the same Worker code; only the hostname MAP and the frontend origin differ.
+deploy_cf_target() {
+  local token="$1" account="$2" zone_name="$3"
+  local frontend_domain="$4" api_domain="$5" blob_domain="$6" web_service="$7"
+  local zone api_host web_host
   zone="$(curl -s -H "Authorization: Bearer $token" \
-    "https://api.cloudflare.com/client/v4/zones?name=$CF_ZONE_NAME" \
+    "https://api.cloudflare.com/client/v4/zones?name=$zone_name" \
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"][0]["id"])')"
   api_host="$(gc run services describe "$API_SERVICE" --region="$REGION" --format='value(status.url)' | sed 's#https://##')"
-  web_host="$(gc run services describe "$WEB_SERVICE" --region="$REGION" --format='value(status.url)' | sed 's#https://##')"
+  web_host="$(gc run services describe "$web_service" --region="$REGION" --format='value(status.url)' | sed 's#https://##')"
 
   # Proxied (orange-cloud) placeholder AAAA records so the Worker route intercepts.
-  for name in "${FRONTEND_DOMAIN%%.*}" "${API_DOMAIN%%.*}"; do
+  for name in "${frontend_domain%%.*}" "${api_domain%%.*}"; do
     curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/dns_records" \
       -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
       --data "{\"type\":\"AAAA\",\"name\":\"$name\",\"content\":\"100::\",\"proxied\":true}" >/dev/null
@@ -253,8 +319,8 @@ step_dns() {
   local worker; worker="$(mktemp).js"
   cat > "$worker" <<EOF
 const MAP = {
-  "$FRONTEND_DOMAIN": "$web_host",
-  "$API_DOMAIN": "$api_host",
+  "$frontend_domain": "$web_host",
+  "$api_domain": "$api_host",
 };
 addEventListener("fetch", (e) => e.respondWith(handle(e.request)));
 async function handle(request) {
@@ -269,14 +335,14 @@ EOF
     -H "Authorization: Bearer $token" -H "Content-Type: application/javascript" \
     --data-binary @"$worker" >/dev/null
   rm -f "$worker"
-  for name in "$FRONTEND_DOMAIN" "$API_DOMAIN"; do
+  for name in "$frontend_domain" "$api_domain"; do
     curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/workers/routes" \
       -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
       --data "{\"pattern\":\"$name/*\",\"script\":\"$WORKER_NAME\"}" >/dev/null
   done
 
   # Blob proxy: a second Worker that reverse-proxies the public GCS bucket behind
-  # $BLOB_DOMAIN so blob reads are edge-cached. It forwards the path to
+  # the blob domain so blob reads are edge-cached. It forwards the path to
   # storage.googleapis.com/$BUCKET_NAME/... and lets Cloudflare cache per the
   # origin Cache-Control (immutable v2/{hash} blobs cache ~1y at the edge). The
   # short-lived manifest.json is ALSO edge-cached (cacheEverything honors its
@@ -287,7 +353,7 @@ EOF
   # instead of each paying an origin RTT.
   curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/dns_records" \
     -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    --data "{\"type\":\"AAAA\",\"name\":\"${BLOB_DOMAIN%%.*}\",\"content\":\"100::\",\"proxied\":true}" >/dev/null
+    --data "{\"type\":\"AAAA\",\"name\":\"${blob_domain%%.*}\",\"content\":\"100::\",\"proxied\":true}" >/dev/null
   local blobworker; blobworker="$(mktemp).js"
   cat > "$blobworker" <<EOF
 const BUCKET = "$BUCKET_NAME";
@@ -313,7 +379,23 @@ EOF
   rm -f "$blobworker"
   curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/workers/routes" \
     -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    --data "{\"pattern\":\"$BLOB_DOMAIN/*\",\"script\":\"$BLOB_WORKER_NAME\"}" >/dev/null
+    --data "{\"pattern\":\"$blob_domain/*\",\"script\":\"$BLOB_WORKER_NAME\"}" >/dev/null
+}
+
+step_dns() {
+  local token account
+  token="$(resolve_secret CLOUDFLARE_API_TOKEN "$CF_SECRET_FILE" CLOUDFLARE_API_TOKEN)"
+  account="$(resolve_secret CLOUDFLARE_ACCOUNT_ID "$CF_SECRET_FILE" CLOUDFLARE_ACCOUNT_ID)"
+  deploy_cf_target "$token" "$account" "$CF_ZONE_NAME" \
+    "$FRONTEND_DOMAIN" "$API_DOMAIN" "$BLOB_DOMAIN" "$WEB_SERVICE"
+}
+
+step_dns_pp() {
+  local token account
+  token="$(resolve_secret POPCORNPENGUINS_CLOUDFLARE_API_TOKEN "$PP_CF_SECRET_FILE" CLOUDFLARE_API_TOKEN)"
+  account="$(resolve_secret POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID "$PP_CF_SECRET_FILE" CLOUDFLARE_ACCOUNT_ID)"
+  deploy_cf_target "$token" "$account" "$PP_CF_ZONE_NAME" \
+    "$PP_FRONTEND_DOMAIN" "$PP_API_DOMAIN" "$PP_BLOB_DOMAIN" "$WEB_PP_SERVICE"
 }
 
 case "${1:-all}" in
@@ -326,9 +408,10 @@ case "${1:-all}" in
   frontend) step_frontend ;;
   scheduler) step_scheduler ;;
   dns) step_dns ;;
+  dns-pp) step_dns_pp ;;
   all)
     step_apis; step_bucket; step_secrets; step_images
-    step_backend; step_seed; step_frontend; step_scheduler; step_dns ;;
+    step_backend; step_seed; step_frontend; step_scheduler; step_dns; step_dns_pp ;;
   *) echo "unknown step: $1" >&2; exit 1 ;;
 esac
 echo "OK: ${1:-all}"
