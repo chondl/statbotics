@@ -28,22 +28,21 @@
 # Every account-specific value is a variable (see CONFIG). No secrets are baked
 # in and none are ever echoed.
 #
-# SECRETS ARE ENV-FIRST. Each secret is read from its environment variable
-# when set; only when the variable is unset does the script fall back to the
-# corresponding Mac home-directory file. A missing secret fails naming the
-# VARIABLE (agent containers have only env vars — the files exist only on the
-# Mac, where ~/.zshrc.local sources them). Variables:
-#   TBA_AUTH_KEY                          (file: ~/thebluealliance_api_key.txt)
-#   CLOUDFLARE_API_TOKEN                  (file: ~/iterativerefinement_secret.txt)
-#   CLOUDFLARE_ACCOUNT_ID                 (file: ~/iterativerefinement_secret.txt)
-#   POPCORNPENGUINS_CLOUDFLARE_API_TOKEN  (file: ~/popcornpenguins_secret.txt)
-#   POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID (file: ~/popcornpenguins_secret.txt)
+# SECRETS ARE ENVIRONMENT VARIABLES — ONLY. The canonical store is the
+# operator's macOS Keychain; every secret arrives in the shell as an
+# environment variable at start (home-directory secret files are fully
+# retired). A missing secret fails fast naming the VARIABLE. Variables:
+#   TBA_AUTH_KEY                          (step: secrets)
+#   CLOUDFLARE_API_TOKEN                  (step: dns    — Cloudflare acct #1)
+#   CLOUDFLARE_ACCOUNT_ID                 (step: dns)
+#   POPCORNPENGUINS_CLOUDFLARE_API_TOKEN  (step: dns-pp — Cloudflare acct #2)
+#   POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID (step: dns-pp)
 #
 # Prereqs on the operator machine:
 #   - gcloud authenticated (gcloud auth login) with rights to the target project
 #   - a billing account linked to the project
 #   - curl, python3, git
-#   - the secrets above (env vars, or the Mac fallback files)
+#   - the secret environment variables above (for the steps being run)
 #
 # Usage:
 #   Edit the CONFIG block (or export the vars), then:
@@ -101,14 +100,9 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 BACKEND_DIR="${BACKEND_DIR:-$REPO_DIR/backend}"
 FRONTEND_DIR="${FRONTEND_DIR:-$REPO_DIR/frontend}"
 
-# Secret inputs — env-first; the files are the Mac fallback (never printed).
-TBA_KEY_FILE="${TBA_KEY_FILE:-$HOME/thebluealliance_api_key.txt}"   # X-TBA-Auth-Key=<value>
-
 # Cloudflare account #1 (iterativerefinement.com)
-CF_SECRET_FILE="${CF_SECRET_FILE:-$HOME/iterativerefinement_secret.txt}"
 CF_ZONE_NAME="${CF_ZONE_NAME:-iterativerefinement.com}"
 # Cloudflare account #2 (popcornpenguins.com)
-PP_CF_SECRET_FILE="${PP_CF_SECRET_FILE:-$HOME/popcornpenguins_secret.txt}"
 PP_CF_ZONE_NAME="${PP_CF_ZONE_NAME:-popcornpenguins.com}"
 # Worker script names are per-account, so both accounts can use the same names.
 WORKER_NAME="${WORKER_NAME:-statbotics-proxy}"
@@ -120,18 +114,14 @@ IMAGE_WEB_PP="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$WEB_PP_SERVICE:latest
 
 gc() { gcloud --project="$PROJECT_ID" "$@"; }
 
-# resolve_secret VAR FILE KEY — print the secret: $VAR from the environment
-# when set, else the value of the `KEY=` line in FILE when that file exists.
-# Fails naming the VARIABLE (not the file): agent containers have only env
-# vars, so "set $VAR" is always the actionable message.
-resolve_secret() {
-  local var="$1" file="$2" key="$3" val
+# require_env VAR — print the secret from the environment variable VAR, or
+# fail fast naming the VARIABLE. Secrets come exclusively from the operator's
+# environment (Keychain-backed); there is no file fallback.
+require_env() {
+  local var="$1" val
   val="${!var:-}"
-  if [ -z "$val" ] && [ -f "$file" ]; then
-    val="$(grep "^$key=" "$file" | head -1 | cut -d= -f2-)"
-  fi
   if [ -z "$val" ]; then
-    echo "ERROR: secret \$$var is not set. Export $var (or, on the Mac, provide a $key= line in $file)." >&2
+    echo "ERROR: \$$var is not set. It is provided by the operator's environment — declare it there, then re-run." >&2
     return 1
   fi
   printf '%s' "$val"
@@ -162,7 +152,7 @@ EOF
 }
 
 step_secrets() {
-  local tba; tba="$(resolve_secret TBA_AUTH_KEY "$TBA_KEY_FILE" X-TBA-Auth-Key)"
+  local tba; tba="$(require_env TBA_AUTH_KEY)"
   printf '%s' "$tba" | gc secrets create tba-auth-key --data-file=- --replication-policy=automatic 2>/dev/null \
     || printf '%s' "$tba" | gc secrets versions add tba-auth-key --data-file=-
   gc artifacts repositories create "$AR_REPO" --repository-format=docker \
@@ -384,16 +374,16 @@ EOF
 
 step_dns() {
   local token account
-  token="$(resolve_secret CLOUDFLARE_API_TOKEN "$CF_SECRET_FILE" CLOUDFLARE_API_TOKEN)"
-  account="$(resolve_secret CLOUDFLARE_ACCOUNT_ID "$CF_SECRET_FILE" CLOUDFLARE_ACCOUNT_ID)"
+  token="$(require_env CLOUDFLARE_API_TOKEN)"
+  account="$(require_env CLOUDFLARE_ACCOUNT_ID)"
   deploy_cf_target "$token" "$account" "$CF_ZONE_NAME" \
     "$FRONTEND_DOMAIN" "$API_DOMAIN" "$BLOB_DOMAIN" "$WEB_SERVICE"
 }
 
 step_dns_pp() {
   local token account
-  token="$(resolve_secret POPCORNPENGUINS_CLOUDFLARE_API_TOKEN "$PP_CF_SECRET_FILE" CLOUDFLARE_API_TOKEN)"
-  account="$(resolve_secret POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID "$PP_CF_SECRET_FILE" CLOUDFLARE_ACCOUNT_ID)"
+  token="$(require_env POPCORNPENGUINS_CLOUDFLARE_API_TOKEN)"
+  account="$(require_env POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID)"
   deploy_cf_target "$token" "$account" "$PP_CF_ZONE_NAME" \
     "$PP_FRONTEND_DOMAIN" "$PP_API_DOMAIN" "$PP_BLOB_DOMAIN" "$WEB_PP_SERVICE"
 }

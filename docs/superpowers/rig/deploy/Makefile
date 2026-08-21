@@ -11,9 +11,9 @@
 # Full-history rebuild + reseed:     see ../../deliverables/historical-backfill.md
 # What "offseason" means in the app: see DEPLOY.md (§4)
 #
-# Prereqs: gcloud auth (chondl@gmail.com), ADC present. Secrets are env-first
-# ($TBA_AUTH_KEY etc. — see deploy.sh header); the Mac's home-dir secret files
-# are only a fallback.
+# Prereqs: gcloud auth (chondl@gmail.com), ADC present. Secrets come ONLY from
+# environment variables ($TBA_AUTH_KEY etc. — see deploy.sh header), injected
+# from the operator's Keychain-backed environment; there are no secret files.
 # All vars below can be overridden on the command line, e.g. `make deploy REGION=us-east1`.
 #
 # ============================================================================
