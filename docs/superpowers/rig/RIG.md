@@ -51,12 +51,13 @@ switch on.
 
 - The backend hardcodes a working public read key in `src/tba/constants.py`
   (`AUTH_KEY`); it returns 200 against TBA v3 (verified) and seeded all of 2026.
-- A real user-provided key exists at `/Users/chondl/thebluealliance_api_key.txt`
+- A real user-provided key is available env-first: `$TBA_AUTH_KEY` when set
+  (agent containers), else `~/thebluealliance_api_key.txt` on the Mac
   (chmod 600, format `X-TBA-Auth-Key=<value>`, value not reproduced here).
-  `rig_bootstrap.py` reads it and injects it into the live TBA session at runtime
-  (no tracked file edited). `seed.py`, `update.py`, and `serve.py` all import
-  `rig_bootstrap`, so every rig TBA call uses the real key when the file is
-  present and falls back to the hardcoded public key otherwise.
+  `rig_bootstrap.py` resolves it and injects it into the live TBA session at
+  runtime (no tracked file edited). `seed.py`, `update.py`, and `serve.py` all
+  import `rig_bootstrap`, so every rig TBA call uses the real key when either
+  source exists and falls back to the hardcoded public key otherwise.
 
 ---
 

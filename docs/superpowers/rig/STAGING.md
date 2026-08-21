@@ -71,13 +71,20 @@ emits both for every historical year it processes (`write_parquet` +
 Rebuild one year with `make reprocess-year YEAR=…`; full history via a
 db-less `reset_all_years` — see
 [historical-backfill.md](../deliverables/historical-backfill.md).
-- Cloudflare Worker: `statbotics-proxy` (+ 2 routes, 2 proxied AAAA records).
+- Cloudflare Workers: `statbotics-proxy` + `statbotics-blob-proxy`, in TWO
+  accounts — zone `iterativerefinement.com` and zone `popcornpenguins.com`
+  (3 routes + 3 proxied AAAA records each; the popcornpenguins zone fronts the
+  `statbotics-web-pp` frontend and the same shared backend/bucket).
 
 ## Secrets
 
-- Local: `/Users/chondl/statbotics_staging_secret.txt` (chmod 600, KEY=VALUE).
+- Env-first everywhere: the deploy tooling reads each secret from its
+  environment variable when set, falling back to the Mac's chmod-600 home-dir
+  files only when the variable is unset. The full variable/file table is in
+  [DEPLOY.md](deploy/DEPLOY.md) §9. (`~/statbotics_staging_secret.txt` is
+  retired — it held the DB password, and the DB is gone.)
 - Secret Manager: `tba-auth-key`. (`db-password` was deleted with Cloud SQL on
-  2026-07-27; the local secret file's `CLOUDSQL_*` lines are now dead entries.)
+  2026-07-27.)
 - The backend gets `TBA_AUTH_KEY` (from `tba-auth-key`). Never echo it.
 
 ## Common operations

@@ -5,8 +5,14 @@ The one doc for building, deploying, and rebuilding data on the staging mirror.
 prefer `make <target>` over ad-hoc `gcloud`. Full-history rebuilds are in
 [historical-backfill.md](../../deliverables/historical-backfill.md).
 
-Mirror: <https://statbotics.iterativerefinement.com> · API: <https://api-statbotics.iterativerefinement.com>
-GCP project `statbotics-staging` · Cloud Run services `statbotics-api` / `statbotics-web` ·
+Mirrors: <https://statbotics.iterativerefinement.com> and
+<https://statbotics.popcornpenguins.com> — same code, same commit, one shared
+backend/bucket; each domain has its own frontend Cloud Run service and its own
+Cloudflare account for DNS/Workers (APIs:
+<https://api-statbotics.iterativerefinement.com> /
+<https://api-statbotics.popcornpenguins.com>, both proxying the same service).
+GCP project `statbotics-staging` · Cloud Run services `statbotics-api` /
+`statbotics-web` / `statbotics-web-pp` ·
 GCS bucket `statbotics-staging-site` ·
 Cloud Scheduler `statbotics-update` (hourly) + `statbotics-gc` (daily 04:30 UTC) +
 `statbotics-tba-sweep` (daily 05:30 UTC — one historical year's TBA revalidation).
@@ -32,14 +38,14 @@ correctness: adequately test in production before calling it done.
 ### There is exactly one way to deploy
 
 ```
-make ship        # build BOTH images + roll BOTH services
+make ship        # build ALL images + roll ALL services (api + one web per mirror)
 ```
 
 **That is the only sanctioned deploy command.** Not `gcloud builds submit`, not
 `gcloud run deploy`, not `make deploy-api` because "only the backend changed".
-The component targets (`build`, `build-api`, `build-web`, `deploy`,
-`deploy-api`, `deploy-web`) are **guarded** and will refuse to run unless they
-were reached through `make ship`:
+The component targets (`build`, `build-api`, `build-web`, `build-web-pp`,
+`deploy`, `deploy-api`, `deploy-web`, `deploy-web-pp`) are **guarded** and will
+refuse to run unless they were reached through `make ship`:
 
 ```
 $ make deploy-api
@@ -68,8 +74,8 @@ If you find yourself reasoning toward a shortcut — because the change is small
 because a build seems redundant, because you already know which service is
 affected — that is precisely the situation this rule exists for. Run `make ship`.
 
-Prereqs: `gcloud` auth (chondl@gmail.com), ADC present, `~/thebluealliance_api_key.txt`,
-`~/statbotics_staging_secret.txt`, `~/iterativerefinement_secret.txt` (Cloudflare).
+Prereqs: `gcloud` auth (chondl@gmail.com), ADC present, and the secrets from
+§9 (env-first; Mac home-dir files are only a fallback).
 
 ## 2. MANDATORY pre-deploy checklist
 
@@ -83,9 +89,9 @@ skip items, record the evidence:
       static-prerender step errors on every page in a sandbox — not a code defect;
       confirm by diffing behavior against unmodified master.)
 - [ ] **Reviewed.** Task/whole-branch review clean, or findings triaged and fixed.
-- [ ] **Images rebuilt from the deploy branch.** `make build` → both Cloud Builds
-      report SUCCESS. Stale images silently ship old code.
-- [ ] **Deployed.** `make deploy` → both revisions serve 100% traffic.
+- [ ] **Images rebuilt from the deploy branch.** `make build` → all three Cloud
+      Builds report SUCCESS. Stale images silently ship old code.
+- [ ] **Deployed.** `make deploy` → all three revisions serve 100% traffic.
 - [ ] **Code-live smoke.** Hit the new endpoint/behavior on the deployed service
       (`make verify-event EVENT=<key>`, or curl the new route) — confirm it
       *responds*, not just that the revision rolled.
@@ -93,7 +99,8 @@ skip items, record the evidence:
 - [ ] **Production verification.** Exercise the feature end-to-end against the
       mirror (API + a real browser load where relevant). Capture outputs. Check
       unrelated pages for regressions.
-- [ ] **`make smoke`** passes.
+- [ ] **`make smoke`** passes and **`make verify-web`** returns 200 for both
+      mirror domains.
 - [ ] **Schedulers resumed** if paused.
 
 ## 3. Data rebuild flows
@@ -216,14 +223,15 @@ page, list, and API after each cycle.
 | Relational DB | **none** | Deleted 2026-07-27. Final `pg_dump` archived at `gs://statbotics-staging-db-final-export/` (private). |
 | Blob store | **GCS** bucket `statbotics-staging-site` | uniform access, `allUsers:objectViewer`, CORS for the frontend origin. **World-readable — never put dumps or private data here.** |
 | Seed / stand-up | **Cloud Run job** `statbotics-seed` (created on demand by `deploy.sh seed`) | db-less: `reset_all_years` + `refresh_teams` + a trailing partial cycle. See also [historical-backfill.md](../../deliverables/historical-backfill.md). |
-| Frontend container | **Cloud Run** `statbotics-web` | image built with `--build-arg BACKEND_URL=…/v3/site BUCKET_URL=https://$BLOB_DOMAIN PROD=True` |
+| Frontend containers | **Cloud Run** `statbotics-web` + `statbotics-web-pp` | one per mirror domain, same code: `BACKEND_URL`/`BUCKET_URL` are inlined at `next build`, so each domain's image is built with its own `--build-arg BACKEND_URL=…/v3/site BUCKET_URL=https://$BLOB_DOMAIN PROD=True` |
 | Scheduler | **Cloud Scheduler** `statbotics-update` | `0 * * * *` → backend `/v3/site/update_curr_year` |
-| CDN/DNS/TLS | **Cloudflare** Workers `statbotics-proxy` (+ `statbotics-blob-proxy`) | Worker rewrites Host to the `*.run.app` origin; edge TLS. run.app hosts are stable across revisions, so redeploys need no DNS change. |
+| CDN/DNS/TLS | **Cloudflare** Workers `statbotics-proxy` (+ `statbotics-blob-proxy`), in **two accounts** — zone `iterativerefinement.com` (`deploy.sh dns`) and zone `popcornpenguins.com` (`deploy.sh dns-pp`) | Worker rewrites Host to the `*.run.app` origin; edge TLS. Each zone's api-/blobs- hostnames proxy the SAME backend service and bucket; only the frontend origin differs. run.app hosts are stable across revisions, so redeploys need no DNS change. |
 | Secrets | **Secret Manager** `tba-auth-key` | compute SA granted `secretAccessor`. `db-password` was deleted with Cloud SQL on 2026-07-27. |
 | Images | **Artifact Registry** repo `statbotics` | built by Cloud Build |
 
 First-time stand-up order (`deploy.sh all`): `apis → bucket → secrets → images →
-backend → seed → frontend → scheduler → dns`. The `sql` step no longer exists.
+backend → seed → frontend → scheduler → dns → dns-pp`. The `sql` step no longer
+exists.
 The long pole is now `seed`: a db-less `reset_all_years` over 2002–present,
 bounded by TBA fetch time from a cold bucket (task timeout 2 h; ~5–8 min against
 a warm TBA cache).
@@ -232,6 +240,16 @@ a warm TBA cache).
 the custom Host, which Cloud Run 404s (it routes by the `*.run.app` host). The
 Worker sets the URL host to the run.app origin so the subrequest carries the
 right Host.
+
+**Planned migration:** the intent is to eventually make
+`statbotics.iterativerefinement.com` a plain redirect to
+`statbotics.popcornpenguins.com` (edit the acct-#1 `statbotics-proxy` Worker to
+return a 301 for that hostname). Two dependencies survive such a redirect and
+must be handled first if the old zone is ever retired outright: the backend's
+`BACKEND_URL` env (its ETL self-call goes through
+`api-statbotics.iterativerefinement.com`) would need repointing to the
+popcornpenguins API domain, and any external API users on the old api-/blobs-
+hostnames would break.
 
 ## 8. Porting notes — AWS equivalents
 
@@ -247,11 +265,27 @@ right Host.
 | Cloud Build | **CodeBuild** / local docker build | Frontend still needs the `BACKEND_URL`/`BUCKET_URL` build-args. |
 | Cloudflare Worker | **CloudFront + ACM** (or keep Cloudflare) | Distribution with the App Runner/ALB origin + ACM cert. |
 
-## 9. Inputs (secret files, never committed)
+## 9. Secrets (env-first, never committed, never printed)
 
-- `~/thebluealliance_api_key.txt` — `X-TBA-Auth-Key=<value>`.
-- `~/statbotics_staging_secret.txt` — DB password etc. (generated by `deploy.sh sql`), chmod 600.
-- `~/iterativerefinement_secret.txt` — `CLOUDFLARE_API_TOKEN=…`, `CLOUDFLARE_ACCOUNT_ID=…`.
+Every secret is resolved **environment-variable first**; only when the variable
+is unset does the tooling fall back to the corresponding Mac home-directory
+file. A missing secret fails naming the **variable** — in agent containers the
+files do not exist and the values arrive only as env vars, while on the Mac
+`~/.zshrc.local` sources the (chmod 600, untracked) files below.
+
+| Env var | Mac fallback file (`KEY=VALUE` lines) | Used by |
+|---|---|---|
+| `TBA_AUTH_KEY` | `~/thebluealliance_api_key.txt` (`X-TBA-Auth-Key=<value>`) | `deploy.sh secrets` (writes it to Secret Manager) |
+| `CLOUDFLARE_API_TOKEN` | `~/iterativerefinement_secret.txt` | `deploy.sh dns` (Cloudflare acct #1) |
+| `CLOUDFLARE_ACCOUNT_ID` | `~/iterativerefinement_secret.txt` | `deploy.sh dns` |
+| `POPCORNPENGUINS_CLOUDFLARE_API_TOKEN` | `~/popcornpenguins_secret.txt` (`CLOUDFLARE_API_TOKEN=` line) | `deploy.sh dns-pp` (Cloudflare acct #2) |
+| `POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID` | `~/popcornpenguins_secret.txt` (`CLOUDFLARE_ACCOUNT_ID=` line) | `deploy.sh dns-pp` |
+
+Routine `make ship` needs **none** of these — only `gcloud` auth. The
+Cloudflare tokens are needed only when (re)running the `dns`/`dns-pp` steps,
+and `TBA_AUTH_KEY` only when (re)creating the Secret Manager entry. The
+`~/statbotics_staging_secret.txt` file is retired (it held the DB password;
+the DB is gone).
 
 All account-specific values are variables at the top of `deploy.sh` and the
 Makefile; override via env to target a different project/domain.
