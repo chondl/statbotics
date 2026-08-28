@@ -166,6 +166,36 @@ def test_event_type_override_beats_offseason(monkeypatch):
     assert events["2026isrtp"]["week"] == 6
 
 
+def test_district_forced_offseason_by_override(monkeypatch):
+    # 2026isde1, 2026isde2, and 2026iscmp are real entries in
+    # EVENT_TYPE_OVERRIDES (-> OFFSEASON): official Israeli district events
+    # that ran AFTER Worlds 2026 finished (war-delayed), so they must not
+    # move season EPA/standings or next season's seed. The override makes
+    # them week-9 offseason events; the sandbox handles the rest downstream.
+    patch_tba(
+        monkeypatch,
+        [
+            mk_event("2026isde1", 1, week=16),
+            mk_event("2026isde2", 1, week=17),
+            mk_event("2026iscmp", 2, week=18),
+        ],
+    )
+    events = get_keys()
+    for key in ("2026isde1", "2026isde2", "2026iscmp"):
+        assert events[key]["type"] == EventType.OFFSEASON
+        assert events[key]["week"] == 9
+
+
+def test_pre_worlds_israeli_districts_stay_district(monkeypatch):
+    # 2026isde3/2026isde4 ran BEFORE Worlds and are deliberately absent from
+    # EVENT_TYPE_OVERRIDES: they stay ordinary district events and keep
+    # updating season EPA.
+    patch_tba(monkeypatch, [mk_event("2026isde3", 1, week=2)])
+    events = get_keys()
+    assert events["2026isde3"]["type"] == EventType.DISTRICT
+    assert events["2026isde3"]["week"] == 3
+
+
 def test_regular_regional_unaffected(monkeypatch):
     patch_tba(monkeypatch, [mk_event("2026gal", 0, week=0)])
     events = get_keys()
