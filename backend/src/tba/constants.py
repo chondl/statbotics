@@ -136,4 +136,12 @@ DISTRICT_OVERRIDES: Dict[str, str] = {}
 # Override TBA's event type classification for specific events
 EVENT_TYPE_OVERRIDES: Dict[str, EventType] = {
     "2026isrtp": EventType.DISTRICT,
+    # Official Israeli district events that ran AFTER Worlds 2026 finished
+    # (war-delayed). Treated as offseason: event EPA only, no effect on
+    # season standings or next season's start EPA. The pre-Worlds Israeli
+    # events (2026isde3, 2026isde4, 2026isrtp) keep their season-affecting
+    # types.
+    "2026isde1": EventType.OFFSEASON,
+    "2026isde2": EventType.OFFSEASON,
+    "2026iscmp": EventType.OFFSEASON,
 }

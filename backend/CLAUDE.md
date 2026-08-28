@@ -229,6 +229,12 @@ Update these at the start of each new season:
 - `src/constants.py`: `CURR_YEAR`, `CURR_WEEK`
 - `src/tba/breakdown.py`: add `all_keys[YEAR]` and `clean_breakdown_{year}()`
 
+Note for 2027 prep: the war-delayed 2026 Israeli events that ran after Worlds
+(`2026isde1`, `2026isde2`, `2026iscmp`) are forced to OFFSEASON via
+`EVENT_TYPE_OVERRIDES` (`src/tba/constants.py`) — a deliberate owner decision.
+Offseason typing already keeps them out of season standings and out of the
+2027 start-EPA seed; do not "fix" them back to district types.
+
 ## Seeding EPA Means from Preseason Events
 
 See `src/data/CLAUDE.md` for the query and instructions.
