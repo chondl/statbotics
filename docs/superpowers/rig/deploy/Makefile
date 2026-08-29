@@ -1,11 +1,11 @@
 # Statbotics staging mirror — operational targets.
 #
 # Codifies the deterministic steps to build, deploy, and rebuild data on the
-# staging mirrors (statbotics.iterativerefinement.com and
-# statbotics.popcornpenguins.com — one shared backend/bucket, one frontend
-# service per domain) so they don't have to be remembered or re-derived. Wraps
-# deploy.sh for build/deploy and adds targeted data-rebuild + operational
-# targets.
+# staging mirror (PRIMARY domain statbotics.popcornpenguins.com; the legacy
+# statbotics.iterativerefinement.com 301s there, while its api-/blobs-
+# hostnames stay up for legacy clients) so they don't have to be remembered
+# or re-derived. Wraps deploy.sh for build/deploy and adds targeted
+# data-rebuild + operational targets.
 #
 # Architecture + first-time setup:  see DEPLOY.md
 # Full-history rebuild + reseed:     see ../../deliverables/historical-backfill.md
@@ -21,9 +21,8 @@
 # ============================================================================
 #  Do not hand-roll `gcloud builds submit` / `gcloud run deploy`. Do not build
 #  or deploy one service "because only the backend changed". Do not reach for
-#  build-api/build-web/build-web-pp/deploy-api/deploy-web/deploy-web-pp
-#  directly — they are GUARDED and will refuse to run outside `make ship`
-#  (see require-ship below).
+#  build-api/build-web/deploy-api/deploy-web directly — they are GUARDED and
+#  will refuse to run outside `make ship` (see require-ship below).
 #
 #  Why this is a hard rule and not a preference: partial and hand-rolled
 #  deploys are how production silently drifts from branch history. An
@@ -31,6 +30,10 @@
 #  `make deploy` preserves. Reasoning "the frontend didn't change, so I'll
 #  skip it" is exactly the judgment call this rule exists to remove — it is
 #  cheap to rebuild an unchanged image and expensive to be wrong.
+#
+#  Deliberate config-only changes to a live service (e.g. the 2026-08-29
+#  BACKEND_URL repoint) use `gcloud run services update --update-env-vars`,
+#  never `gcloud run deploy`.
 #
 #  If you genuinely need a partial deploy, you must opt in explicitly and say
 #  why:  make deploy-api ALLOW_PARTIAL=1
@@ -57,15 +60,18 @@ PROJECT_ID   ?= statbotics-staging
 REGION       ?= us-central1
 AR_REPO      ?= statbotics
 API_SERVICE  ?= statbotics-api
-WEB_SERVICE  ?= statbotics-web
-WEB_PP_SERVICE ?= statbotics-web-pp
+# The frontend service keeps its historical `-pp` suffix (born as the
+# popcornpenguins mirror; the old `statbotics-web` was deleted 2026-08-29).
+WEB_SERVICE  ?= statbotics-web-pp
 BUCKET_NAME  ?= statbotics-staging-site
-API_DOMAIN   ?= api-statbotics.iterativerefinement.com
-BLOB_DOMAIN  ?= blobs-statbotics.iterativerefinement.com
-FRONTEND_DOMAIN ?= statbotics.iterativerefinement.com
-PP_API_DOMAIN   ?= api-statbotics.popcornpenguins.com
-PP_BLOB_DOMAIN  ?= blobs-statbotics.popcornpenguins.com
-PP_FRONTEND_DOMAIN ?= statbotics.popcornpenguins.com
+# PRIMARY domains (zone popcornpenguins.com); the LEGACY_* hostnames on
+# iterativerefinement.com stay up for legacy clients (api/blobs proxy, and
+# the frontend hostname 301s to the primary).
+API_DOMAIN   ?= api-statbotics.popcornpenguins.com
+BLOB_DOMAIN  ?= blobs-statbotics.popcornpenguins.com
+FRONTEND_DOMAIN ?= statbotics.popcornpenguins.com
+LEGACY_API_DOMAIN      ?= api-statbotics.iterativerefinement.com
+LEGACY_FRONTEND_DOMAIN ?= statbotics.iterativerefinement.com
 API_MEMORY   ?= 8Gi
 API_CPU      ?= 2
 UPDATE_SCHED ?= statbotics-update
@@ -91,7 +97,6 @@ SMOKE        ?= $(MAIN_DIR)/docs/superpowers/rig/smoke/smoke.py
 
 IMAGE_API    := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(AR_REPO)/$(API_SERVICE):latest
 IMAGE_WEB    := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(AR_REPO)/$(WEB_SERVICE):latest
-IMAGE_WEB_PP := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(AR_REPO)/$(WEB_PP_SERVICE):latest
 GC           := gcloud --project $(PROJECT_ID)
 API_URL      := https://$(API_DOMAIN)
 
@@ -131,8 +136,8 @@ require-ship:
 	@test -n "$(SHIP)$(ALLOW_PARTIAL)" || { \
 	  echo "ERROR: '$(MAKECMDGOALS)' is a PARTIAL deploy step — use 'make ship'."; \
 	  echo ""; \
-	  echo "  make ship   builds ALL images and rolls ALL services (backend + one"; \
-	  echo "              frontend per mirror domain), which is the"; \
+	  echo "  make ship   builds ALL images and rolls ALL services (backend +"; \
+	  echo "              frontend), which is the"; \
 	  echo "              only sanctioned way to deploy this mirror. Partial and"; \
 	  echo "              hand-rolled deploys are how production drifts from branch"; \
 	  echo "              history. See DEPLOY.md section 1."; \
@@ -142,23 +147,17 @@ require-ship:
 	  exit 1; \
 	}
 
-.PHONY: build build-api build-web build-web-pp
-build: require-ship build-api build-web build-web-pp ## (internal — use `make ship`) Build all three container images
+.PHONY: build build-api build-web
+build: require-ship build-api build-web ## (internal — use `make ship`) Build both container images
 
 build-api: require-ship check-deploy-src ## (internal — use `make ship`) Build the backend image
 	cd $(BACKEND_DIR) && $(GC) builds submit --tag $(IMAGE_API) --timeout=1200 .
 
-# One frontend image per mirror: BACKEND_URL/BUCKET_URL are inlined into the JS
-# bundle at `next build` time, so each domain needs its own build of the SAME code.
-build-web: require-ship check-deploy-src ## (internal — use `make ship`) Build the iterativerefinement frontend image
+# BACKEND_URL/BUCKET_URL are inlined into the JS bundle at `next build` time,
+# so the frontend image is domain-specific by construction.
+build-web: require-ship check-deploy-src ## (internal — use `make ship`) Build the frontend image
 	cfg=$$(mktemp).yaml; \
 	printf 'steps:\n  - name: gcr.io/cloud-builders/docker\n    args: [build, --build-arg=BACKEND_URL=https://$(API_DOMAIN)/v3/site, --build-arg=BUCKET_URL=https://$(BLOB_DOMAIN), --build-arg=PROD=True, -t, $(IMAGE_WEB), .]\nimages: [$(IMAGE_WEB)]\noptions: {machineType: E2_HIGHCPU_8}\n' > $$cfg; \
-	cd $(FRONTEND_DIR) && $(GC) builds submit --config=$$cfg --timeout=1800 .; \
-	rm -f $$cfg
-
-build-web-pp: require-ship check-deploy-src ## (internal — use `make ship`) Build the popcornpenguins frontend image
-	cfg=$$(mktemp).yaml; \
-	printf 'steps:\n  - name: gcr.io/cloud-builders/docker\n    args: [build, --build-arg=BACKEND_URL=https://$(PP_API_DOMAIN)/v3/site, --build-arg=BUCKET_URL=https://$(PP_BLOB_DOMAIN), --build-arg=PROD=True, -t, $(IMAGE_WEB_PP), .]\nimages: [$(IMAGE_WEB_PP)]\noptions: {machineType: E2_HIGHCPU_8}\n' > $$cfg; \
 	cd $(FRONTEND_DIR) && $(GC) builds submit --config=$$cfg --timeout=1800 .; \
 	rm -f $$cfg
 
@@ -167,23 +166,20 @@ build-web-pp: require-ship check-deploy-src ## (internal — use `make ship`) Bu
 # NEVER hand-roll `gcloud run deploy` instead of these — a typed-out deploy
 # re-specifies the container and silently drops env vars and secrets that this
 # image-only `services update` preserves.
-.PHONY: deploy deploy-api deploy-web deploy-web-pp
-deploy: require-ship deploy-api deploy-web deploy-web-pp ## (internal — use `make ship`) Deploy all three images to Cloud Run
+.PHONY: deploy deploy-api deploy-web
+deploy: require-ship deploy-api deploy-web ## (internal — use `make ship`) Deploy both images to Cloud Run
 
 deploy-api: require-ship ## (internal — use `make ship`) Roll the backend service to the latest image
 	$(GC) run services update $(API_SERVICE) --region $(REGION) --image $(IMAGE_API)
 
-deploy-web: require-ship ## (internal — use `make ship`) Roll the iterativerefinement frontend service to the latest image
+deploy-web: require-ship ## (internal — use `make ship`) Roll the frontend service to the latest image
 	$(GC) run services update $(WEB_SERVICE) --region $(REGION) --image $(IMAGE_WEB)
-
-deploy-web-pp: require-ship ## (internal — use `make ship`) Roll the popcornpenguins frontend service to the latest image
-	$(GC) run services update $(WEB_PP_SERVICE) --region $(REGION) --image $(IMAGE_WEB_PP)
 
 # THE deploy path. Everything above is a component of this and is guarded so it
 # cannot be invoked piecemeal by accident.
 .PHONY: ship
 ship: SHIP := 1
-ship: build deploy ## ⭐ THE ONLY WAY TO DEPLOY: build all three images + roll all three services
+ship: build deploy ## ⭐ THE ONLY WAY TO DEPLOY: build both images + roll both services
 
 # ---------------------------- DB RETIREMENT (DONE) ----------------------------
 # There is no database, and no mode flag either. Retirement completed
@@ -279,11 +275,14 @@ smoke: ## Run the smoke suite against the mirror
 	python3 $(SMOKE) --base-url $(API_URL) --data-url $(API_URL) \
 	  --gcs https://storage.googleapis.com --bucket $(BUCKET_NAME) --year $${YEAR:-2026}
 
-verify-web: ## Curl both frontend mirrors + both API hostnames (expect HTTP 200 each)
-	@for u in https://$(FRONTEND_DOMAIN)/ https://$(PP_FRONTEND_DOMAIN)/ https://$(API_DOMAIN)/v3/year/2026 https://$(PP_API_DOMAIN)/v3/year/2026; do \
+verify-web: ## Primary frontend/API + legacy API expect 200; legacy frontend expects a 301 to the primary
+	@for u in https://$(FRONTEND_DOMAIN)/ https://$(API_DOMAIN)/v3/year/2026 https://$(LEGACY_API_DOMAIN)/v3/year/2026; do \
 	  code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$$u"); \
-	  echo "  $$u -> $$code"; \
-	done
+	  echo "  $$u -> $$code (want 200)"; \
+	done; \
+	out=$$(curl -s -o /dev/null -w '%{http_code} -> %{redirect_url}' --max-time 30 "https://$(LEGACY_FRONTEND_DOMAIN)/teams?x=1"); \
+	echo "  https://$(LEGACY_FRONTEND_DOMAIN)/teams?x=1 -> $$out"; \
+	echo "    (want 301 -> https://$(FRONTEND_DOMAIN)/teams?x=1)"
 
 verify-event: require-EVENT ## Curl an event + its matches. Usage: make verify-event EVENT=2026iri
 	@echo "== $(EVENT) =="
@@ -329,7 +328,7 @@ bill-services: ## Gross spend per service over the window. Usage: make bill-serv
 	@$(BQ) 'SELECT service.description AS service, ROUND(SUM(cost),2) AS gross, ROUND(SUM(cost)/COUNT(DISTINCT DATE(usage_start_time)),3) AS per_day FROM `$(BILLING_TABLE)` $(BILL_WINDOW) GROUP BY service HAVING gross > 0 ORDER BY gross DESC'
 
 # ------------------------- ARTIFACT REGISTRY CLEANUP -------------------------
-# Every `make ship` pushes a new statbotics-api + statbotics-web image and moves
+# Every `make ship` pushes a new statbotics-api + statbotics-web-pp image and moves
 # the `:latest` tag off the previous one, so the repo accumulates untagged
 # versions forever. By 2026-07-30 that was 59 versions / 34.9 GB and $0.11/day
 # — the only cost line that grows monotonically, and the largest recurring one

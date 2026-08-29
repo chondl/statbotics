@@ -18,7 +18,7 @@ import zlib
 SC = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(SC, "baseline-pre-perf")
 OUT = os.path.join(SC, "verification-results.md")
-API = "https://api-statbotics.iterativerefinement.com"
+API = "https://api-statbotics.popcornpenguins.com"
 BUCKET = "https://storage.googleapis.com/statbotics-staging-site"
 TOL = 1e-9
 

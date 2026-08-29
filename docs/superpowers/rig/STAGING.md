@@ -22,13 +22,15 @@ NaN→N/A, 2015 elim-winner derivation; see staging.md). Live revisions: api
 
 | Component | URL |
 |-----------|-----|
-| Frontend | https://statbotics.iterativerefinement.com |
-| Backend API | https://api-statbotics.iterativerefinement.com |
+| Frontend (PRIMARY) | https://statbotics.popcornpenguins.com |
+| Backend API (PRIMARY) | https://api-statbotics.popcornpenguins.com |
+| Legacy frontend | https://statbotics.iterativerefinement.com (301 → primary since 2026-08-29) |
+| Legacy API alias | https://api-statbotics.iterativerefinement.com (kept for clients that don't follow redirects) |
 | Public bucket | https://storage.googleapis.com/statbotics-staging-site (`/manifest.json`) |
 | Backend (direct run.app) | https://statbotics-api-630091002690.us-central1.run.app |
-| Frontend (direct run.app) | https://statbotics-web-630091002690.us-central1.run.app |
+| Frontend (direct run.app) | https://statbotics-web-pp-630091002690.us-central1.run.app |
 
-Health: `curl https://api-statbotics.iterativerefinement.com/info`.
+Health: `curl https://api-statbotics.popcornpenguins.com/info`.
 
 ## Project / naming
 
@@ -37,7 +39,8 @@ Health: `curl https://api-statbotics.iterativerefinement.com/info`.
 - Cloud SQL: **none** — deleted 2026-07-27 (DB retirement Phase 4). Final dump
   at `gs://statbotics-staging-db-final-export/` (private).
 - Bucket: `statbotics-staging-site` (public read).
-- Cloud Run: `statbotics-api` (2 vCPU / 8Gi), `statbotics-web`; jobs
+- Cloud Run: `statbotics-api` (2 vCPU / 8Gi), `statbotics-web-pp` (the old
+  `statbotics-web` was deleted 2026-08-29 with the domain migration); jobs
   `statbotics-seed` (db-less stand-up, created on demand by `deploy.sh seed`),
   transient `statbotics-reprocess-{year}` jobs from `make reprocess-year`.
 - Scheduler: `statbotics-update` (hourly), `statbotics-gc` (daily 04:30 UTC, v2/ GC).
@@ -72,9 +75,10 @@ Rebuild one year with `make reprocess-year YEAR=…`; full history via a
 db-less `reset_all_years` — see
 [historical-backfill.md](../deliverables/historical-backfill.md).
 - Cloudflare Workers: `statbotics-proxy` + `statbotics-blob-proxy`, in TWO
-  accounts — zone `iterativerefinement.com` and zone `popcornpenguins.com`
-  (3 routes + 3 proxied AAAA records each; the popcornpenguins zone fronts the
-  `statbotics-web-pp` frontend and the same shared backend/bucket).
+  accounts (3 routes + 3 proxied AAAA records each). PRIMARY zone
+  `popcornpenguins.com` proxies frontend/api/blobs; legacy zone
+  `iterativerefinement.com` 301s its frontend hostname to the primary and
+  proxies its api-/blobs- hostnames to the same shared backend/bucket.
 
 ## Secrets
 
@@ -96,9 +100,9 @@ gcloud --project=statbotics-staging builds submit \
 gcloud --project=statbotics-staging run services update statbotics-api --region=us-central1 \
   --image us-central1-docker.pkg.dev/statbotics-staging/statbotics/statbotics-api:latest
 ```
-Frontend: build `statbotics-web` with build-args `BACKEND_URL`, `BUCKET_URL`,
+Frontend: build `statbotics-web-pp` with build-args `BACKEND_URL`, `BUCKET_URL`,
 `PROD=True` (see `docs/superpowers/rig/deploy/deploy.sh step_images`), then
-`run services update statbotics-web`.
+`run services update statbotics-web-pp`.
 
 Re-seed (schema + full current-year build + trailing partial cycle):
 ```bash

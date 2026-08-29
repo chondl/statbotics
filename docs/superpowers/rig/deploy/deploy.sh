@@ -7,16 +7,20 @@
 # Idempotent-ish: safe to re-run; most `create` steps are guarded and fall back
 # to `update`.
 #
-# TWO FRONTEND MIRRORS, ONE BACKEND. The stack serves two domains:
-#   - statbotics.iterativerefinement.com  (Cloud Run `statbotics-web`,
-#     Cloudflare account #1 / zone iterativerefinement.com)
-#   - statbotics.popcornpenguins.com      (Cloud Run `statbotics-web-pp`,
-#     Cloudflare account #2 / zone popcornpenguins.com)
-# Both frontends are built from the SAME code at the SAME commit; they differ
-# only in the BACKEND_URL/BUCKET_URL build args (inlined at `next build` time),
-# which point each mirror at its own domain's api-/blobs- hostnames. The
-# backend Cloud Run service, GCS bucket, seed job, and schedulers are shared —
-# each Cloudflare zone's api-/blobs- hostnames proxy the same origins.
+# ONE FRONTEND, ONE BACKEND, ONE LEGACY REDIRECT. Since 2026-08-29 the
+# PRIMARY (and only) user-facing domain is statbotics.popcornpenguins.com
+# (Cloud Run `statbotics-web-pp`, Cloudflare account "Popcorn Penguins" /
+# zone popcornpenguins.com). The former mirror domain on zone
+# iterativerefinement.com (Cloudflare account #1) is LEGACY:
+#   - statbotics.iterativerefinement.com       -> 301 to the primary frontend
+#     (path+query preserved; the Cloud Run `statbotics-web` service that used
+#     to serve it is deleted)
+#   - api-statbotics.iterativerefinement.com   -> still proxies the backend
+#     (kept alive for external API clients that may not follow redirects)
+#   - blobs-statbotics.iterativerefinement.com -> still proxies the bucket
+#     (kept alive for old open tabs / external blob readers)
+# The backend Cloud Run service, GCS bucket, seed job, and schedulers are
+# shared; both zones' api-/blobs- hostnames proxy the same origins.
 #
 # NO DATABASE. DB retirement Phase 4 completed 2026-07-27: the Cloud SQL
 # instance, the `db-password` secret, the `cloudsql.client` IAM grant, and the
@@ -33,10 +37,10 @@
 # environment variable at start (home-directory secret files are fully
 # retired). A missing secret fails fast naming the VARIABLE. Variables:
 #   TBA_AUTH_KEY                          (step: secrets)
-#   CLOUDFLARE_API_TOKEN                  (step: dns    — Cloudflare acct #1)
-#   CLOUDFLARE_ACCOUNT_ID                 (step: dns)
-#   POPCORNPENGUINS_CLOUDFLARE_API_TOKEN  (step: dns-pp — Cloudflare acct #2)
+#   POPCORNPENGUINS_CLOUDFLARE_API_TOKEN  (step: dns-pp — PRIMARY zone popcornpenguins.com)
 #   POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID (step: dns-pp)
+#   CLOUDFLARE_API_TOKEN                  (step: dns-legacy — legacy zone iterativerefinement.com)
+#   CLOUDFLARE_ACCOUNT_ID                 (step: dns-legacy)
 #
 # Prereqs on the operator machine:
 #   - gcloud authenticated (gcloud auth login) with rights to the target project
@@ -49,13 +53,14 @@
 #     ./deploy.sh apis         # enable APIs
 #     ./deploy.sh bucket       # create public GCS bucket + CORS
 #     ./deploy.sh secrets      # create Secret Manager entries + IAM
-#     ./deploy.sh images       # build backend + both frontend images
+#     ./deploy.sh images       # build backend + frontend images
 #     ./deploy.sh backend      # deploy backend Cloud Run service
 #     ./deploy.sh seed         # create + run the schema/seed job
-#     ./deploy.sh frontend     # deploy both frontend Cloud Run services
+#     ./deploy.sh frontend     # deploy the frontend Cloud Run service
 #     ./deploy.sh scheduler    # hourly update job
-#     ./deploy.sh dns          # Cloudflare acct #1: iterativerefinement.com records + workers
-#     ./deploy.sh dns-pp       # Cloudflare acct #2: popcornpenguins.com records + workers
+#     ./deploy.sh dns-pp       # PRIMARY zone popcornpenguins.com: records + proxy workers
+#     ./deploy.sh dns-legacy   # legacy zone iterativerefinement.com: frontend 301 + api/blob proxies
+#                              #   (REDIRECT_STATUS=302 ./deploy.sh dns-legacy for a temporary redirect)
 #     ./deploy.sh all          # everything, in order
 #
 set -euo pipefail
@@ -70,10 +75,12 @@ BUCKET_NAME="${BUCKET_NAME:-statbotics-staging-site}"
 # Artifact Registry
 AR_REPO="${AR_REPO:-statbotics}"
 
-# Cloud Run
+# Cloud Run. The frontend service keeps its historical `-pp` suffix: it was
+# born as the popcornpenguins mirror while `statbotics-web` (deleted
+# 2026-08-29) served the old iterativerefinement domain. Renaming a live
+# Cloud Run service is not worth the churn.
 API_SERVICE="${API_SERVICE:-statbotics-api}"
-WEB_SERVICE="${WEB_SERVICE:-statbotics-web}"
-WEB_PP_SERVICE="${WEB_PP_SERVICE:-statbotics-web-pp}"
+WEB_SERVICE="${WEB_SERVICE:-statbotics-web-pp}"
 SEED_JOB="${SEED_JOB:-statbotics-seed}"
 API_MEMORY="${API_MEMORY:-8Gi}"            # full-stack cycle in the serving container: EPA replay + cycle-start deepcopy + snapshot(24MB) + Parquet serialization + DuckDB cache. Measured peaks: 2Gi OOM @2055MiB, 4Gi OOM @4166MiB. 8Gi (needs >=2 CPU) clears it.
 API_CPU="${API_CPU:-2}"                     # 8Gi memory on Cloud Run requires >=2 vCPU
@@ -82,35 +89,37 @@ WEB_CPU="${WEB_CPU:-1}"
 SEED_MEMORY="${SEED_MEMORY:-4Gi}"
 MAX_INSTANCES="${MAX_INSTANCES:-2}"
 
-# Domains, Cloudflare account #1 (zone iterativerefinement.com)
-FRONTEND_DOMAIN="${FRONTEND_DOMAIN:-statbotics.iterativerefinement.com}"
-API_DOMAIN="${API_DOMAIN:-api-statbotics.iterativerefinement.com}"
+# PRIMARY domains (zone popcornpenguins.com, Cloudflare acct "Popcorn Penguins").
+FRONTEND_DOMAIN="${FRONTEND_DOMAIN:-statbotics.popcornpenguins.com}"
+API_DOMAIN="${API_DOMAIN:-api-statbotics.popcornpenguins.com}"
 # Cloudflare-proxied hostname for the public blob bucket (edge-cached, so the
 # frontend reads blobs through the CDN instead of straight from GCS).
-BLOB_DOMAIN="${BLOB_DOMAIN:-blobs-statbotics.iterativerefinement.com}"
+BLOB_DOMAIN="${BLOB_DOMAIN:-blobs-statbotics.popcornpenguins.com}"
 
-# Domains, Cloudflare account #2 (zone popcornpenguins.com). Same hostname
-# pattern; api-/blobs- proxy the SAME backend service and bucket as account #1.
-PP_FRONTEND_DOMAIN="${PP_FRONTEND_DOMAIN:-statbotics.popcornpenguins.com}"
-PP_API_DOMAIN="${PP_API_DOMAIN:-api-statbotics.popcornpenguins.com}"
-PP_BLOB_DOMAIN="${PP_BLOB_DOMAIN:-blobs-statbotics.popcornpenguins.com}"
+# LEGACY domains (zone iterativerefinement.com, Cloudflare acct #1). The
+# frontend hostname 301s to the primary; api-/blobs- still proxy the shared
+# backend/bucket for legacy clients. See the header comment.
+LEGACY_FRONTEND_DOMAIN="${LEGACY_FRONTEND_DOMAIN:-statbotics.iterativerefinement.com}"
+LEGACY_API_DOMAIN="${LEGACY_API_DOMAIN:-api-statbotics.iterativerefinement.com}"
+LEGACY_BLOB_DOMAIN="${LEGACY_BLOB_DOMAIN:-blobs-statbotics.iterativerefinement.com}"
+# 301 in steady state; export REDIRECT_STATUS=302 to stage a new target
+# reversibly before committing browsers to a permanent redirect.
+REDIRECT_STATUS="${REDIRECT_STATUS:-301}"
 
 # Source tree (the merged `staging` branch checkout)
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 BACKEND_DIR="${BACKEND_DIR:-$REPO_DIR/backend}"
 FRONTEND_DIR="${FRONTEND_DIR:-$REPO_DIR/frontend}"
 
-# Cloudflare account #1 (iterativerefinement.com)
-CF_ZONE_NAME="${CF_ZONE_NAME:-iterativerefinement.com}"
-# Cloudflare account #2 (popcornpenguins.com)
-PP_CF_ZONE_NAME="${PP_CF_ZONE_NAME:-popcornpenguins.com}"
-# Worker script names are per-account, so both accounts can use the same names.
+# Cloudflare zones. Worker script names are per-account, so both accounts can
+# use the same names.
+CF_ZONE_NAME="${CF_ZONE_NAME:-popcornpenguins.com}"
+LEGACY_CF_ZONE_NAME="${LEGACY_CF_ZONE_NAME:-iterativerefinement.com}"
 WORKER_NAME="${WORKER_NAME:-statbotics-proxy}"
 BLOB_WORKER_NAME="${BLOB_WORKER_NAME:-statbotics-blob-proxy}"
 
 IMAGE_API="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$API_SERVICE:latest"
 IMAGE_WEB="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$WEB_SERVICE:latest"
-IMAGE_WEB_PP="$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$WEB_PP_SERVICE:latest"
 
 gc() { gcloud --project="$PROJECT_ID" "$@"; }
 
@@ -141,9 +150,11 @@ step_bucket() {
     --location="$REGION" --uniform-bucket-level-access 2>/dev/null || true
   gc storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" \
     --member=allUsers --role=roles/storage.objectViewer
+  # The legacy origin stays in CORS: tabs opened before the 301 cutover keep
+  # fetching blobs with the old Origin until their next full page load.
   local cors; cors="$(mktemp)"
   cat > "$cors" <<EOF
-[{"origin":["https://$FRONTEND_DOMAIN","https://$PP_FRONTEND_DOMAIN","http://localhost:3000"],
+[{"origin":["https://$FRONTEND_DOMAIN","https://$LEGACY_FRONTEND_DOMAIN","http://localhost:3000"],
   "responseHeader":["Content-Type","Cache-Control"],
   "method":["GET","HEAD","OPTIONS"],"maxAgeSeconds":3600}]
 EOF
@@ -167,9 +178,9 @@ step_secrets() {
     --member="serviceAccount:$sa" --role=roles/storage.objectAdmin
 }
 
-# build_web_image IMAGE API_DOMAIN BLOB_DOMAIN — one frontend image per mirror:
-# BACKEND_URL/BUCKET_URL are inlined into the JS bundle at `next build` time,
-# so each domain needs its own build of the same code.
+# build_web_image IMAGE API_DOMAIN BLOB_DOMAIN — BACKEND_URL/BUCKET_URL are
+# inlined into the JS bundle at `next build` time, so the frontend image is
+# domain-specific by construction.
 build_web_image() {
   local image="$1" api_domain="$2" blob_domain="$3"
   local cfg; cfg="$(mktemp).yaml"
@@ -190,7 +201,6 @@ EOF
 step_images() {
   ( cd "$BACKEND_DIR" && gc builds submit --tag "$IMAGE_API" --timeout=1200 . )
   build_web_image "$IMAGE_WEB" "$API_DOMAIN" "$BLOB_DOMAIN"
-  build_web_image "$IMAGE_WEB_PP" "$PP_API_DOMAIN" "$PP_BLOB_DOMAIN"
 }
 
 # Serve /v3 from DuckDB-over-Parquet (API_BACKEND=duckdb). There is no
@@ -238,15 +248,11 @@ step_seed() {
 }
 
 step_frontend() {
-  local svc image
-  for svc in "$WEB_SERVICE" "$WEB_PP_SERVICE"; do
-    [ "$svc" = "$WEB_SERVICE" ] && image="$IMAGE_WEB" || image="$IMAGE_WEB_PP"
-    gc run deploy "$svc" \
-      --image="$image" --region="$REGION" --platform=managed \
-      --allow-unauthenticated \
-      --min-instances=0 --max-instances="$MAX_INSTANCES" \
-      --cpu="$WEB_CPU" --memory="$WEB_MEMORY" --timeout=300
-  done
+  gc run deploy "$WEB_SERVICE" \
+    --image="$IMAGE_WEB" --region="$REGION" --platform=managed \
+    --allow-unauthenticated \
+    --min-instances=0 --max-instances="$MAX_INSTANCES" \
+    --cpu="$WEB_CPU" --memory="$WEB_MEMORY" --timeout=300
 }
 
 step_scheduler() {
@@ -285,9 +291,9 @@ step_scheduler() {
 }
 
 # deploy_cf_target TOKEN ACCOUNT ZONE_NAME FRONTEND_DOMAIN API_DOMAIN BLOB_DOMAIN WEB_SERVICE
-# One Cloudflare account's worth of edge config: proxied AAAA records + the
-# reverse-proxy Worker (frontend + api) + the blob-proxy Worker. Both zones use
-# the same Worker code; only the hostname MAP and the frontend origin differ.
+# The PRIMARY zone's edge config: proxied AAAA records + the reverse-proxy
+# Worker (frontend + api) + the blob-proxy Worker. (The legacy zone gets a
+# redirect variant instead — see step_dns_legacy.)
 deploy_cf_target() {
   local token="$1" account="$2" zone_name="$3"
   local frontend_domain="$4" api_domain="$5" blob_domain="$6" web_service="$7"
@@ -331,16 +337,22 @@ EOF
       --data "{\"pattern\":\"$name/*\",\"script\":\"$WORKER_NAME\"}" >/dev/null
   done
 
-  # Blob proxy: a second Worker that reverse-proxies the public GCS bucket behind
-  # the blob domain so blob reads are edge-cached. It forwards the path to
-  # storage.googleapis.com/$BUCKET_NAME/... and lets Cloudflare cache per the
-  # origin Cache-Control (immutable v2/{hash} blobs cache ~1y at the edge). The
-  # short-lived manifest.json is ALSO edge-cached (cacheEverything honors its
-  # origin max-age=60), but the Worker rewrites the client-facing Cache-Control
-  # back to max-age=60 so the zone's Browser Cache TTL floor cannot stretch it —
-  # the Worker's own response header wins over the floor, verified live. This
-  # lets co-located event visitors share one edge-cached manifest per PoP
-  # instead of each paying an origin RTT.
+  put_blob_target "$token" "$account" "$zone" "$blob_domain"
+}
+
+# put_blob_target TOKEN ACCOUNT ZONE_ID BLOB_DOMAIN
+# Blob proxy: a Worker that reverse-proxies the public GCS bucket behind
+# the blob domain so blob reads are edge-cached. It forwards the path to
+# storage.googleapis.com/$BUCKET_NAME/... and lets Cloudflare cache per the
+# origin Cache-Control (immutable v2/{hash} blobs cache ~1y at the edge). The
+# short-lived manifest.json is ALSO edge-cached (cacheEverything honors its
+# origin max-age=60), but the Worker rewrites the client-facing Cache-Control
+# back to max-age=60 so the zone's Browser Cache TTL floor cannot stretch it —
+# the Worker's own response header wins over the floor, verified live. This
+# lets co-located event visitors share one edge-cached manifest per PoP
+# instead of each paying an origin RTT.
+put_blob_target() {
+  local token="$1" account="$2" zone="$3" blob_domain="$4"
   curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/dns_records" \
     -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
     --data "{\"type\":\"AAAA\",\"name\":\"${blob_domain%%.*}\",\"content\":\"100::\",\"proxied\":true}" >/dev/null
@@ -372,20 +384,67 @@ EOF
     --data "{\"pattern\":\"$blob_domain/*\",\"script\":\"$BLOB_WORKER_NAME\"}" >/dev/null
 }
 
-step_dns() {
-  local token account
-  token="$(require_env CLOUDFLARE_API_TOKEN)"
-  account="$(require_env CLOUDFLARE_ACCOUNT_ID)"
-  deploy_cf_target "$token" "$account" "$CF_ZONE_NAME" \
-    "$FRONTEND_DOMAIN" "$API_DOMAIN" "$BLOB_DOMAIN" "$WEB_SERVICE"
-}
-
 step_dns_pp() {
   local token account
   token="$(require_env POPCORNPENGUINS_CLOUDFLARE_API_TOKEN)"
   account="$(require_env POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID)"
-  deploy_cf_target "$token" "$account" "$PP_CF_ZONE_NAME" \
-    "$PP_FRONTEND_DOMAIN" "$PP_API_DOMAIN" "$PP_BLOB_DOMAIN" "$WEB_PP_SERVICE"
+  deploy_cf_target "$token" "$account" "$CF_ZONE_NAME" \
+    "$FRONTEND_DOMAIN" "$API_DOMAIN" "$BLOB_DOMAIN" "$WEB_SERVICE"
+}
+
+# Legacy zone (iterativerefinement.com) edge config, cut over 2026-08-29:
+#   - $LEGACY_FRONTEND_DOMAIN  -> redirect ($REDIRECT_STATUS, default 301) to
+#     https://$FRONTEND_DOMAIN preserving path + query
+#   - $LEGACY_API_DOMAIN       -> proxies the backend (legacy API clients)
+#   - $LEGACY_BLOB_DOMAIN      -> proxies the bucket (old tabs, blob readers)
+# Create-only for DNS records/routes; the only overwrite is the PUT of the two
+# statbotics-* Worker scripts in acct #1. Nothing else in the zone is touched.
+step_dns_legacy() {
+  local token account zone api_host
+  token="$(require_env CLOUDFLARE_API_TOKEN)"
+  account="$(require_env CLOUDFLARE_ACCOUNT_ID)"
+  zone="$(curl -s -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones?name=$LEGACY_CF_ZONE_NAME" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"][0]["id"])')"
+  api_host="$(gc run services describe "$API_SERVICE" --region="$REGION" --format='value(status.url)' | sed 's#https://##')"
+
+  for name in "${LEGACY_FRONTEND_DOMAIN%%.*}" "${LEGACY_API_DOMAIN%%.*}"; do
+    curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/dns_records" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      --data "{\"type\":\"AAAA\",\"name\":\"$name\",\"content\":\"100::\",\"proxied\":true}" >/dev/null
+  done
+
+  local worker; worker="$(mktemp).js"
+  cat > "$worker" <<EOF
+const REDIRECT_HOST = "$LEGACY_FRONTEND_DOMAIN";
+const REDIRECT_TO = "https://$FRONTEND_DOMAIN";
+const REDIRECT_STATUS = $REDIRECT_STATUS;
+const MAP = {
+  "$LEGACY_API_DOMAIN": "$api_host",
+};
+addEventListener("fetch", (e) => e.respondWith(handle(e.request)));
+async function handle(request) {
+  const url = new URL(request.url);
+  if (url.hostname === REDIRECT_HOST) {
+    return Response.redirect(REDIRECT_TO + url.pathname + url.search, REDIRECT_STATUS);
+  }
+  const origin = MAP[url.hostname];
+  if (!origin) return new Response("Not found", { status: 404 });
+  url.hostname = origin; url.protocol = "https:"; url.port = "";
+  return fetch(url.toString(), request);
+}
+EOF
+  curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$account/workers/scripts/$WORKER_NAME" \
+    -H "Authorization: Bearer $token" -H "Content-Type: application/javascript" \
+    --data-binary @"$worker" >/dev/null
+  rm -f "$worker"
+  for name in "$LEGACY_FRONTEND_DOMAIN" "$LEGACY_API_DOMAIN"; do
+    curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone/workers/routes" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      --data "{\"pattern\":\"$name/*\",\"script\":\"$WORKER_NAME\"}" >/dev/null
+  done
+
+  put_blob_target "$token" "$account" "$zone" "$LEGACY_BLOB_DOMAIN"
 }
 
 case "${1:-all}" in
@@ -397,11 +456,11 @@ case "${1:-all}" in
   seed) step_seed ;;
   frontend) step_frontend ;;
   scheduler) step_scheduler ;;
-  dns) step_dns ;;
   dns-pp) step_dns_pp ;;
+  dns-legacy) step_dns_legacy ;;
   all)
     step_apis; step_bucket; step_secrets; step_images
-    step_backend; step_seed; step_frontend; step_scheduler; step_dns; step_dns_pp ;;
+    step_backend; step_seed; step_frontend; step_scheduler; step_dns_pp; step_dns_legacy ;;
   *) echo "unknown step: $1" >&2; exit 1 ;;
 esac
 echo "OK: ${1:-all}"

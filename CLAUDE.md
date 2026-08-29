@@ -15,10 +15,13 @@ Statbotics is an open-source data analytics platform for the FIRST Robotics Comp
 
 ## Deploying & operating the staging mirror
 
-This fork is deployed as a live mirror at **statbotics.iterativerefinement.com**
-and **statbotics.popcornpenguins.com** — same code and commit on both, one
-shared backend, one frontend Cloud Run service per domain (each domain's
-Cloudflare account proxies it).
+This fork is deployed as a live mirror at **statbotics.popcornpenguins.com**
+(the PRIMARY domain — one backend + one frontend Cloud Run service, proxied by
+the Popcorn Penguins Cloudflare account). The former domain
+statbotics.iterativerefinement.com 301s there since 2026-08-29;
+api-statbotics.iterativerefinement.com and
+blobs-statbotics.iterativerefinement.com stay up as legacy aliases of the same
+backend/bucket for API clients that may not follow redirects.
 **You are on `cph-staging` — the fork branch that runs production** (the mirror),
 and **all work happens on this branch by default. This is the primary checkout at
 the repository root.** The only exception is preparing a minimal PR back to the
