@@ -10,7 +10,7 @@ import sys
 import urllib.request
 import zlib
 
-API = "https://api-statbotics.iterativerefinement.com"
+API = "https://api-statbotics.popcornpenguins.com"
 BUCKET = "https://storage.googleapis.com/statbotics-staging-site"
 
 API_PATHS = [

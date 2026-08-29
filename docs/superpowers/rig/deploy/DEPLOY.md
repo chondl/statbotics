@@ -5,14 +5,19 @@ The one doc for building, deploying, and rebuilding data on the staging mirror.
 prefer `make <target>` over ad-hoc `gcloud`. Full-history rebuilds are in
 [historical-backfill.md](../../deliverables/historical-backfill.md).
 
-Mirrors: <https://statbotics.iterativerefinement.com> and
-<https://statbotics.popcornpenguins.com> — same code, same commit, one shared
-backend/bucket; each domain has its own frontend Cloud Run service and its own
-Cloudflare account for DNS/Workers (APIs:
-<https://api-statbotics.iterativerefinement.com> /
-<https://api-statbotics.popcornpenguins.com>, both proxying the same service).
+PRIMARY domain: <https://statbotics.popcornpenguins.com> (API
+<https://api-statbotics.popcornpenguins.com>, blobs
+`blobs-statbotics.popcornpenguins.com`; Cloudflare account "Popcorn
+Penguins"). LEGACY domain (Cloudflare account #1, zone
+iterativerefinement.com, cut over 2026-08-29):
+`statbotics.iterativerefinement.com` 301s to the primary frontend
+(path+query preserved; its `statbotics-web` Cloud Run service is deleted),
+while `api-statbotics.iterativerefinement.com` and
+`blobs-statbotics.iterativerefinement.com` STAY UP as proxies to the shared
+backend/bucket — external API clients may not follow redirects, so the
+legacy API hostname is a permanent alias, not a redirect.
 GCP project `statbotics-staging` · Cloud Run services `statbotics-api` /
-`statbotics-web` / `statbotics-web-pp` ·
+`statbotics-web-pp` (the frontend keeps its historical `-pp` suffix) ·
 GCS bucket `statbotics-staging-site` ·
 Cloud Scheduler `statbotics-update` (hourly) + `statbotics-gc` (daily 04:30 UTC) +
 `statbotics-tba-sweep` (daily 05:30 UTC — one historical year's TBA revalidation).
@@ -38,13 +43,13 @@ correctness: adequately test in production before calling it done.
 ### There is exactly one way to deploy
 
 ```
-make ship        # build ALL images + roll ALL services (api + one web per mirror)
+make ship        # build ALL images + roll ALL services (api + web)
 ```
 
 **That is the only sanctioned deploy command.** Not `gcloud builds submit`, not
 `gcloud run deploy`, not `make deploy-api` because "only the backend changed".
-The component targets (`build`, `build-api`, `build-web`, `build-web-pp`,
-`deploy`, `deploy-api`, `deploy-web`, `deploy-web-pp`) are **guarded** and will
+The component targets (`build`, `build-api`, `build-web`,
+`deploy`, `deploy-api`, `deploy-web`) are **guarded** and will
 refuse to run unless they were reached through `make ship`:
 
 ```
@@ -89,9 +94,9 @@ skip items, record the evidence:
       static-prerender step errors on every page in a sandbox — not a code defect;
       confirm by diffing behavior against unmodified master.)
 - [ ] **Reviewed.** Task/whole-branch review clean, or findings triaged and fixed.
-- [ ] **Images rebuilt from the deploy branch.** `make build` → all three Cloud
+- [ ] **Images rebuilt from the deploy branch.** `make build` → both Cloud
       Builds report SUCCESS. Stale images silently ship old code.
-- [ ] **Deployed.** `make deploy` → all three revisions serve 100% traffic.
+- [ ] **Deployed.** `make deploy` → both revisions serve 100% traffic.
 - [ ] **Code-live smoke.** Hit the new endpoint/behavior on the deployed service
       (`make verify-event EVENT=<key>`, or curl the new route) — confirm it
       *responds*, not just that the revision rolled.
@@ -99,8 +104,9 @@ skip items, record the evidence:
 - [ ] **Production verification.** Exercise the feature end-to-end against the
       mirror (API + a real browser load where relevant). Capture outputs. Check
       unrelated pages for regressions.
-- [ ] **`make smoke`** passes and **`make verify-web`** returns 200 for both
-      mirror domains.
+- [ ] **`make smoke`** passes and **`make verify-web`** shows 200s for the
+      primary frontend/API and legacy API, and the legacy frontend 301 pointing
+      at the primary.
 - [ ] **Schedulers resumed** if paused.
 
 ## 3. Data rebuild flows
@@ -223,14 +229,14 @@ page, list, and API after each cycle.
 | Relational DB | **none** | Deleted 2026-07-27. Final `pg_dump` archived at `gs://statbotics-staging-db-final-export/` (private). |
 | Blob store | **GCS** bucket `statbotics-staging-site` | uniform access, `allUsers:objectViewer`, CORS for the frontend origin. **World-readable — never put dumps or private data here.** |
 | Seed / stand-up | **Cloud Run job** `statbotics-seed` (created on demand by `deploy.sh seed`) | db-less: `reset_all_years` + `refresh_teams` + a trailing partial cycle. See also [historical-backfill.md](../../deliverables/historical-backfill.md). |
-| Frontend containers | **Cloud Run** `statbotics-web` + `statbotics-web-pp` | one per mirror domain, same code: `BACKEND_URL`/`BUCKET_URL` are inlined at `next build`, so each domain's image is built with its own `--build-arg BACKEND_URL=…/v3/site BUCKET_URL=https://$BLOB_DOMAIN PROD=True` |
+| Frontend container | **Cloud Run** `statbotics-web-pp` | `BACKEND_URL`/`BUCKET_URL` are inlined at `next build` via `--build-arg BACKEND_URL=…/v3/site BUCKET_URL=https://$BLOB_DOMAIN PROD=True`, so the image is domain-specific. (`statbotics-web`, the old iterativerefinement frontend, was deleted 2026-08-29.) |
 | Scheduler | **Cloud Scheduler** `statbotics-update` | `0 * * * *` → backend `/v3/site/update_curr_year` |
-| CDN/DNS/TLS | **Cloudflare** Workers `statbotics-proxy` (+ `statbotics-blob-proxy`), in **two accounts** — zone `iterativerefinement.com` (`deploy.sh dns`) and zone `popcornpenguins.com` (`deploy.sh dns-pp`) | Worker rewrites Host to the `*.run.app` origin; edge TLS. Each zone's api-/blobs- hostnames proxy the SAME backend service and bucket; only the frontend origin differs. run.app hosts are stable across revisions, so redeploys need no DNS change. |
+| CDN/DNS/TLS | **Cloudflare** Workers `statbotics-proxy` (+ `statbotics-blob-proxy`), in **two accounts** — PRIMARY zone `popcornpenguins.com` (`deploy.sh dns-pp`) and legacy zone `iterativerefinement.com` (`deploy.sh dns-legacy`) | Primary worker rewrites Host to the `*.run.app` origin; edge TLS. Legacy worker 301s the frontend hostname to the primary (path+query preserved; `REDIRECT_STATUS=302` env overrides for a staged cutover) and still proxies the legacy api hostname; the legacy blob worker still proxies the bucket. run.app hosts are stable across revisions, so redeploys need no DNS change. |
 | Secrets | **Secret Manager** `tba-auth-key` | compute SA granted `secretAccessor`. `db-password` was deleted with Cloud SQL on 2026-07-27. |
 | Images | **Artifact Registry** repo `statbotics` | built by Cloud Build |
 
 First-time stand-up order (`deploy.sh all`): `apis → bucket → secrets → images →
-backend → seed → frontend → scheduler → dns → dns-pp`. The `sql` step no longer
+backend → seed → frontend → scheduler → dns-pp → dns-legacy`. The `sql` step no longer
 exists.
 The long pole is now `seed`: a db-less `reset_all_years` over 2002–present,
 bounded by TBA fetch time from a cold bucket (task timeout 2 h; ~5–8 min against
@@ -241,15 +247,17 @@ the custom Host, which Cloud Run 404s (it routes by the `*.run.app` host). The
 Worker sets the URL host to the run.app origin so the subrequest carries the
 right Host.
 
-**Planned migration:** the intent is to eventually make
-`statbotics.iterativerefinement.com` a plain redirect to
-`statbotics.popcornpenguins.com` (edit the acct-#1 `statbotics-proxy` Worker to
-return a 301 for that hostname). Two dependencies survive such a redirect and
-must be handled first if the old zone is ever retired outright: the backend's
-`BACKEND_URL` env (its ETL self-call goes through
-`api-statbotics.iterativerefinement.com`) would need repointing to the
-popcornpenguins API domain, and any external API users on the old api-/blobs-
-hostnames would break.
+**Migration completed 2026-08-29:** `statbotics.iterativerefinement.com` now
+301s to `statbotics.popcornpenguins.com` (acct-#1 `statbotics-proxy` Worker;
+staged as a 302 first, then flipped to 301 after verification), the
+`statbotics-web` Cloud Run service and its Artifact Registry package are
+deleted, and the backend's `BACKEND_URL` env was repointed to
+`api-statbotics.popcornpenguins.com` (config-only
+`gcloud run services update --update-env-vars`). What deliberately remains on
+the legacy zone: `api-statbotics.iterativerefinement.com` and
+`blobs-statbotics.iterativerefinement.com` keep proxying the shared
+backend/bucket, because external API clients may not follow redirects. If the
+legacy zone is ever retired outright, those clients break — announce first.
 
 ## 8. Porting notes — AWS equivalents
 
@@ -277,13 +285,13 @@ the operator's environment.
 | Env var | Used by |
 |---|---|
 | `TBA_AUTH_KEY` | `deploy.sh secrets` (writes it to Secret Manager); rig scripts via `rig_bootstrap.py` |
-| `CLOUDFLARE_API_TOKEN` | `deploy.sh dns` (Cloudflare acct #1, zone iterativerefinement.com) |
-| `CLOUDFLARE_ACCOUNT_ID` | `deploy.sh dns` |
-| `POPCORNPENGUINS_CLOUDFLARE_API_TOKEN` | `deploy.sh dns-pp` (Cloudflare acct #2, zone popcornpenguins.com) |
+| `POPCORNPENGUINS_CLOUDFLARE_API_TOKEN` | `deploy.sh dns-pp` (PRIMARY zone popcornpenguins.com) |
 | `POPCORNPENGUINS_CLOUDFLARE_ACCOUNT_ID` | `deploy.sh dns-pp` |
+| `CLOUDFLARE_API_TOKEN` | `deploy.sh dns-legacy` (legacy zone iterativerefinement.com) |
+| `CLOUDFLARE_ACCOUNT_ID` | `deploy.sh dns-legacy` |
 
 Routine `make ship` needs **none** of these — only `gcloud` auth. The
-Cloudflare tokens are needed only when (re)running the `dns`/`dns-pp` steps,
+Cloudflare tokens are needed only when (re)running the `dns-pp`/`dns-legacy` steps,
 and `TBA_AUTH_KEY` only when (re)creating the Secret Manager entry.
 
 All account-specific values are variables at the top of `deploy.sh` and the
