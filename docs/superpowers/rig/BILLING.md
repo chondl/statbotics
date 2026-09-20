@@ -321,7 +321,14 @@ Confirmed model:
 Serving API reads is nearly free by comparison: `/v3/matches` and
 `/v3/team_events` average **0.4 s** on a quiet day.
 
-### Cost does not scale with audience
+### GCP cost does not scale with audience
+
+> **Scope — this section is about GCP only, and that was not stated clearly
+> enough before.** Cloudflare Workers are a *second meter* that GCP billing
+> cannot see, and unlike Cloud Run it bills one invocation per request with no
+> cache exemption. Read
+> [Cloudflare Workers: the second meter](#cloudflare-workers-the-second-meter-and-it-does-scale-with-requests)
+> before concluding that audience is free.
 
 Tempting but wrong conclusion: "850 pings during IRI ⇒ viewers drive cost." Two
 hard limits in `backend/src/data/router.py` prevent that:
@@ -389,3 +396,152 @@ publicized, so this is presumed to be a third-party agent.
 fast and idle time is free. But it is why api never scales to zero, and it will
 not stop on its own. If api request volume ever looks inexplicably high, check
 for this before assuming a regression.
+
+## Cloudflare Workers: the second meter, and it DOES scale with requests
+
+Added 2026-09-20, after the account tripped the free plan's 100,000
+requests/day cap during Chezy Champs (`2026cc`) and a card had to be added.
+
+**Every public hostname of the mirror is a Cloudflare Worker route.** Not just
+blobs — the frontend and the API too. `deploy.sh` `deploy_cf_target` creates
+them:
+
+| Route | Worker | What it does |
+|---|---|---|
+| `statbotics.popcornpenguins.com/*` | `statbotics-proxy` | rewrites Host → `statbotics-web-pp` Cloud Run |
+| `api-statbotics.popcornpenguins.com/*` | `statbotics-proxy` | rewrites Host → `statbotics-api` Cloud Run |
+| `blobs-statbotics.popcornpenguins.com/*` | `statbotics-blob-proxy` | path-rewrites onto GCS + `cacheEverything` |
+
+The Workers exist for one dull reason: Cloud Run's `*.run.app` URL rejects a
+foreign `Host` header, and GCS needs the bucket name prefixed onto the path.
+Both are Host/path rewrites — nothing that inherently needs compute.
+
+### Gotcha: a Worker runs on cache HITs, so edge caching does NOT reduce Worker billing
+
+The cache lookup happens *inside* the Worker's subrequest, behind it. A Worker
+attached to a route therefore executes on **every** request, whatever
+`cf-cache-status` says. Measured 2026-09-20 against the already-blob-ified
+path — 200 sequential requests for one immutable, already-cached
+`v2/event/2026cc.<hash>` blob, every response `cf-cache-status: HIT`:
+
+```
+workersInvocationsAdaptive, statbotics-blob-proxy, by minute
+  12:34Z    9      <- baseline is ~4/min
+  12:35Z  203      <- the 200 requests
+```
+
+Zero origin work, zero GCS egress, ~200 billed invocations. **Corollary: moving
+more of the site onto static blobs reduces Cloud Run and GCS cost but leaves
+the Worker count essentially unchanged.** The only way to cut invocations is to
+take the Worker off the route — a Cloud Run domain mapping, or a declarative
+Cloudflare Origin Rule doing the Host/path rewrite — after which cached
+requests are served by the edge with no Worker and are not metered at all.
+
+### September 2026 actuals
+
+```
+date          proxy       blob      total
+2026-09-17      2,514      3,189      5,703
+2026-09-18      4,672      3,674      8,346
+2026-09-19     91,738     10,252    101,990   <- Chezy Champs; over the 100k/day free cap
+2026-09-20     51,349      4,979     56,328
+```
+
+Month to date: **413,585 requests** (`statbotics-proxy` 344,132 ·
+`statbotics-blob-proxy` 69,453). Paid Workers is $5/month including 10M
+requests, then $0.30/M — roughly 16x headroom at current volume, so the
+practical effect of the card is removing the *daily cap*, not a spend increase.
+
+### What drove the spike: a second external poller, and it is not viewers
+
+Matched two-hour windows of Cloud Run request logs, quiet day vs. Chezy
+Saturday:
+
+| | 09-17 12–14Z (quiet) | 09-19 12–14Z (Chezy) |
+|---|---|---|
+| Total requests | 292 | 6,739 |
+| UA `node` | **0** | **6,233** |
+| UA `python-httpx` (the 07-18 poller) | 235 | 188 |
+| Browsers | 51 | 290 |
+
+Browser traffic roughly 6x'd — a few hundred requests. The rest is one
+automated client, UA `node`, that appears only while events are live:
+
+- 120 distinct URLs, each hit **exactly 60 times in 2 h** — a fixed 2-minute timer.
+- It enumerates **every team at every live event** one at a time:
+  `/v3/team_event/<team>/2026cc` x42, `.../2026onsca1` x25, `.../2026onsca` x24,
+  `.../2026gasuw` x4, plus `/v3/event/<key>` and some `/v3/matches`.
+- So the multiplier is *teams x live events x 30 polls/hour*. It tracks the
+  competition calendar, not the audience.
+
+**The irony: that data is already published as a blob.** The live
+`event/2026cc` blob holds all 42 team_events and 70 matches (623 KB
+decompressed). The poller's 2,520 requests are 42 slices of one object that is
+already edge-cached.
+
+Source IPs in Cloud Run logs are all Cloudflare edge IPs (`104.22.x`,
+`172.71.x`), so the true client is masked. Identifying it needs
+`zone.analytics.read` on `POPCORNPENGUINS_CLOUDFLARE_API_TOKEN`, which the
+token currently lacks.
+
+### A single UI page view is ~55 Worker invocations, and 50 are static assets
+
+Measured 2026-09-20 in a real browser (`performance.getEntriesByType`) on a
+cold load of `/event/2026cc`:
+
+| Host | Requests | What |
+|---|---|---|
+| `statbotics.popcornpenguins.com` | **50** | 1 document + 44 `/_next/*` chunks + 5 other static |
+| `blobs-statbotics.popcornpenguins.com` | 4 | `manifest.json` + 3 data blobs |
+| `api-statbotics.popcornpenguins.com` | 1 | the live-event freshness ping |
+
+**Those 50 static assets are already served entirely from the Cloudflare edge**
+— `/_next/static/css/….css` returns `cf-cache-status: HIT`, `age: 210256`,
+`cache-control: public, max-age=31536000, immutable`. Cloud Run never sees
+them. But the Worker on the route runs anyway, so the frontend's whole
+Cloudflare cost is a per-request tax on objects the edge is already serving for
+free.
+
+This is the scaling exposure. At 100k page views/day the frontend alone is
+~5.5M Worker requests/day (~165M/month, ~$50/month at $0.30/M) for zero origin
+work. The fix is not more caching — it is removing the Worker from the route.
+
+Two facts that make that tractable, both verified in
+[`frontend/`](../../../frontend):
+
+1. **The app is already a pure client-side SPA.** There is not one
+   `getStaticProps`, `getServerSideProps`, `getStaticPaths` or
+   `getInitialProps` in `src/pages/`. Every page is `"use client"`, reads
+   `useRouter().query`, and fetches blobs from a `useEffect`. The Next server
+   renders an empty shell and otherwise serves files.
+2. **The one dynamic thing the UI does is the ping.** `src/pages/event/[event_id].tsx`
+   fires `fetch(${BACKEND_URL}/ping/event/${event_id})` per view for live
+   current-year events — one API-hostname invocation per viewer, and unlike
+   everything else in this document it *does* scale with audience.
+
+### `/v3` sends no cache headers at all
+
+Verified 2026-09-20: `GET /v3/team_event/254/2026cc` returns `200` with **no
+`Cache-Control` and no `ETag`**, and Cloudflare marks it `cf-cache-status:
+DYNAMIC`. The proxy Worker does a bare `fetch(url, request)` with no `cf`
+options, unlike the blob Worker. Every poll therefore reaches DuckDB. The only
+caching is the in-process `alru_cache(ttl=2min)` in `backend/src/api/*.py` —
+and the poller's 2-minute cadence sits exactly on that boundary.
+
+### Unexplained: Gemini API spend, 2026-09-16/17
+
+`make bill-services DAYS=10` over the window to 09-20:
+
+| service | gross |
+|---|---|
+| Gemini API | **8.41** |
+| Cloud Run | 5.02 |
+| Artifact Registry | 0.13 |
+| Cloud Storage | 0.12 |
+
+Essentially all of the Gemini line landed on **09-16 (net $4.43)** and
+**09-17 (net $3.99)** — two *quiet* days with no live event — and it is the
+only spend in the window that credits did not absorb. For comparison, Chezy
+Saturday cost $1.63 gross and $0.00 net. Nothing in the mirror's serving or
+ETL path calls Gemini; something else in project `statbotics-staging` does.
+**Not diagnosed.** If the invoice looks wrong, start here, not with serving.
