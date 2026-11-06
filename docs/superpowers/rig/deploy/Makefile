@@ -270,13 +270,17 @@ resume-cron: ## Resume the schedulers
 	-$(GC) scheduler jobs resume $(REFRESH_TEAMS_SCHED) --location $(REGION)
 
 # --------------------------------- VERIFY ------------------------------------
-.PHONY: smoke verify-web verify-event logs info
+.PHONY: smoke verify-web verify-event logs pipeline-logs info
+# The season the mirror serves, read from the backend so smoke and verify-web
+# follow a season rollover without edits.
+CURR_YEAR := $(shell sed -n 's/^CURR_YEAR = //p' $(MAIN_DIR)/backend/src/constants.py)
+
 smoke: ## Run the smoke suite against the mirror
 	python3 $(SMOKE) --base-url $(API_URL) --data-url $(API_URL) \
-	  --gcs https://storage.googleapis.com --bucket $(BUCKET_NAME) --year $${YEAR:-2026}
+	  --gcs https://storage.googleapis.com --bucket $(BUCKET_NAME) --year $${YEAR:-$(CURR_YEAR)}
 
 verify-web: ## Primary frontend/API + legacy API expect 200; legacy frontend expects a 301 to the primary
-	@for u in https://$(FRONTEND_DOMAIN)/ https://$(API_DOMAIN)/v3/year/2026 https://$(LEGACY_API_DOMAIN)/v3/year/2026; do \
+	@for u in https://$(FRONTEND_DOMAIN)/ https://$(API_DOMAIN)/v3/year/$(CURR_YEAR) https://$(LEGACY_API_DOMAIN)/v3/year/$(CURR_YEAR); do \
 	  code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$$u"); \
 	  echo "  $$u -> $$code (want 200)"; \
 	done; \
@@ -290,8 +294,12 @@ verify-event: require-EVENT ## Curl an event + its matches. Usage: make verify-e
 	@echo "== matches =="
 	@curl -s --max-time 20 "$(API_URL)/v3/matches?event=$(EVENT)" | python3 -c "import json,sys; m=json.load(sys.stdin); print('  count:', len(m) if isinstance(m,list) else m)"
 
-logs: ## Tail recent backend logs
+logs: ## Tail recent backend REQUEST logs (no pipeline stdout; see pipeline-logs)
 	$(GC) run services logs read $(API_SERVICE) --region $(REGION) --limit $${N:-30}
+
+pipeline-logs: ## Pipeline stdout (e.g. '2027 Write Snapshot', WARNING lines) from the last MIN (default 20) minutes
+	$(GC) logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="$(API_SERVICE)" AND logName:"stdout"' \
+	  --freshness=$${MIN:-20}m --limit $${N:-200} --format='value(timestamp,textPayload)' | sort
 
 info: ## Show the deployed backend /info
 	@curl -s --max-time 15 "$(API_URL)/info" | python3 -m json.tool
