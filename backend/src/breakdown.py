@@ -177,6 +177,19 @@ key_to_name = {
         "comp_5": "endgame_fuel",
         "comp_6": "endgame_tower",
     },
+    # Pre-kickoff placeholder: the 2027 game is not announced yet, so only the
+    # standard keys exist. Every year >= 2016 code path looks up rp_1..rp_3 by
+    # name, so the year must be listed here even before its game is known.
+    # TODO(2027 kickoff): real RP names, components, and clean_breakdown_2027.
+    2027: {
+        "auto": "auto_points",
+        "teleop": "teleop_points",
+        "endgame": "endgame_points",
+        "rp_1": "rp_1",
+        "rp_2": "rp_2",
+        "rp_3": "rp_3",
+        "tiebreaker": "tiebreaker_points",
+    },
 }
 
 # Derived fields computed from stored EPA components and added to API breakdown responses.

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Set
 
 from src.tba.constants import (
     CANADA_MAPPING,
@@ -22,10 +22,21 @@ def clean_state(state: str) -> Optional[str]:
     return None
 
 
+_warned_districts: Set[str] = set()
+
+
 def clean_district(district: Optional[str]) -> Optional[str]:
     if district in DISTRICT_MAPPING:
         district = DISTRICT_MAPPING[district]
     if district is not None and district not in VALID_DISTRICTS:
+        # A district TBA knows but VALID_DISTRICTS does not is silently
+        # flattened to "no district" (its events and teams lose their
+        # district). Log it once per process so a new season's district is
+        # noticed: add it to VALID_DISTRICTS and to the frontend's
+        # districtOptions.
+        if district not in _warned_districts:
+            _warned_districts.add(district)
+            print(f"WARNING: unknown district {district!r} treated as None")
         return None
     return district
 

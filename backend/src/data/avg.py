@@ -72,4 +72,25 @@ def process_year(year: Year, matches: List[Match]) -> Year:
         year.teleop_mean -= update
         year.comp_7_mean -= update  # processor_algae_points
 
+    if year.year == 2027 and not week_one_matches:
+        # Pre-kickoff placeholder means, same shape as upstream's 2026 prep.
+        # With no matches every mean is 0, and get_init_epa divides by
+        # score_sd, so the year cannot start without these. Point EPAs are on
+        # an arbitrary scale until real data exists; team order (from prior
+        # seasons' norm_epa) is what is meaningful.
+        # TODO(2027 kickoff): replace with game-manual estimates, then week 0.
+        year.score_mean = 30
+        year.score_sd = 10
+        year.no_foul_mean = 30
+        year.foul_mean = 0
+        year.auto_mean = 10
+        year.teleop_mean = 10
+        year.endgame_mean = 10
+        year.rp_1_mean = 0.5
+        year.rp_2_mean = 0.5
+        year.rp_3_mean = 0.5
+        year.tiebreaker_mean = 0
+        for i in range(0, 10):
+            setattr(year, f"comp_{i}_mean", 0)
+
     return year
