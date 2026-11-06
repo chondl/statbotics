@@ -155,8 +155,10 @@ when the mirror recomputes EPA. Deploy-relevant summary:
 
 - **Edge 524 on long ETL triggers.** Cloudflare times out at ~100 s; Cloud Run
   keeps running (timeout 3600 s). A 524 from `reprocess-curr-year` is expected —
-  poll `make logs | grep "Write Storage"` for completion (the GCS publish is
-  the cycle's completion signal; db-less there is no `Write DB` line at all).
+  poll `make pipeline-logs | grep "Write Snapshot"` for completion (the GCS
+  publish ends with it; db-less there is no `Write DB` line at all).
+  `make logs` shows only request lines, never pipeline stdout, so grepping it
+  for timers never matches.
 - **DuckDB sync TTL ~30 s.** A freshly published event can 404/500 for up to
   ~30 s after a write while the read layer re-syncs Parquet from the manifest.
 - **Cold TBA cache.** A fresh container (new revision or job) has an empty TBA
