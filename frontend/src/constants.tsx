@@ -16,7 +16,7 @@ export const BUCKET_URL =
 
 export const TBA_API_KEY = "XeUIxlvO4CPc44NlLE3ncevDg7bAhp6CRy6zC9M2aQb2zGfys0M30eKwavFJSEJr";
 
-export const CURR_YEAR = 2026;
+export const CURR_YEAR = 2027;
 export const DISABLE_GCS = false;
 
 // 9970 to 9999 are placeholder teams
@@ -51,6 +51,8 @@ export const RP_KEYS: { [key: number]: string[] } = {
   2024: ["melody_rp", "ensemble_rp"],
   2025: ["auto_rp", "coral_rp", "barge_rp"],
   2026: ["energized_rp", "supercharged_rp", "traversal_rp"],
+  // TODO(2027 kickoff): real RP keys once the game is announced
+  2027: ["rp_1", "rp_2", "rp_3"],
 };
 
 export const RP_NAMES: { [key: number]: string[] } = {
@@ -64,6 +66,8 @@ export const RP_NAMES: { [key: number]: string[] } = {
   2024: ["Melody RP", "Ensemble RP"],
   2025: ["Auto RP", "Coral RP", "Barge RP"],
   2026: ["Energized RP", "Supercharged RP", "Traversal RP"],
+  // TODO(2027 kickoff): real RP names once the game is announced
+  2027: ["RP 1", "RP 2", "RP 3"],
 };
 
 export const eventNameMap = {

@@ -22,7 +22,7 @@ AUTH_KEY_BLACKLIST: List[str] = []
 
 # CONFIG
 
-CURR_YEAR = 2026
+CURR_YEAR = 2027
 DISABLE_GCS = False
 # Bumped to 2 on 2026-07-30: hist blobs are immutable within an epoch, so the
 # 2025 historical blobs still held pre-offseason renders -- team pages for

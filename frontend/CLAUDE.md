@@ -68,7 +68,10 @@ Note: uses `127.0.0.1` instead of `localhost` in dev due to a Node.js `undici` b
 
 ## Season Prep
 
-1. Update `CURR_YEAR` and `CURR_WEEK` in `src/constants.tsx`
+Steps 1, 2 and 4 are the pre-kickoff rollover (placeholder RP keys
+`rp_1..rp_3` until the game is known); the rest wait for the game.
+
+1. Update `CURR_YEAR` in `src/constants.tsx` (there is no `CURR_WEEK`)
 2. Add the new year to `RP_KEYS` and `RP_NAMES` in `src/constants.tsx`
 3. Add the new year to `BREAKDOWN_YEARS` once breakdown parsing is implemented in the backend
 4. Add `{ value: "N", label: "N" }` to the **top** of `yearOptions` in `src/components/filterConstants.tsx` — this list is hardcoded and must be updated manually each season

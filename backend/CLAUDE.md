@@ -225,9 +225,34 @@ before its roster went up could never re-enter. The per-event probes are tiered
 
 ## Season Prep
 
-Update these at the start of each new season:
-- `src/constants.py`: `CURR_YEAR`, `CURR_WEEK`
-- `src/tba/breakdown.py`: add `all_keys[YEAR]` and `clean_breakdown_{year}()`
+Season prep happens in two steps: a **pre-kickoff rollover**, which can
+ship as soon as TBA posts the new season's events, and the **game breakdown**,
+which needs the announced game. (There is no `CURR_WEEK` constant any more.)
+
+**Pre-kickoff rollover** (done for 2027 on 2026-11-06):
+- `src/constants.py`: `CURR_YEAR`.
+- `src/breakdown.py`: a placeholder `key_to_name[YEAR]` with only the
+  standard keys (auto/teleop/endgame, `rp_1..rp_3`, tiebreaker). **Required:**
+  an unlisted year gets the pre-2016 single-key layout, and every
+  `year >= 2016` path crashes looking up `rp_1`.
+- `src/data/avg.py`: placeholder means, gated on "no week-1 matches".
+  **Required:** with no matches `score_sd` is 0 and `get_init_epa` divides
+  by it. Point EPAs are on an arbitrary scale until real data exists; the
+  team order (prior seasons' `norm_epa`) is what is meaningful.
+- Deploy, then `make reprocess-curr-year`: the old year's state snapshot
+  does not carry over, so hourly partial cycles skip (`PARTIAL_SKIPPED` in
+  `/info`) until a full reset writes the new year's snapshot. Then
+  `make reprocess-year YEAR=<old year>` so the old year gets its `hist/`
+  blobs (written only for non-current years).
+- Districts: compare TBA's `/districts/{YEAR}` with `VALID_DISTRICTS`; an
+  unknown one is flattened to no district and logged as
+  `WARNING: unknown district`.
+
+**After the game is announced:**
+- `src/breakdown.py`: real `key_to_name[YEAR]` and `derived_breakdown`.
+- `src/tba/breakdown.py`: `clean_breakdown_{year}()` and its dispatch line.
+- `src/data/avg.py`: replace the placeholder means (game-manual estimates,
+  then week 0 — see `src/data/CLAUDE.md`).
 
 Note for 2027 prep: the war-delayed 2026 Israeli events that ran after Worlds
 (`2026isde1`, `2026isde2`, `2026iscmp`) are forced to OFFSEASON via
