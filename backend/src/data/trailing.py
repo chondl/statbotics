@@ -26,7 +26,7 @@ Current-year-only (stay as they are):
   - src/data/tba.py:4
   - src/data/wins.py:5,187
   - src/data/sweep.py:28,39 (and the docstring at 4,47)
-  - src/data/teams.py:11,47,54
+  - src/data/teams.py:11,47,48,54 (47 and 48 are docstring)
   - src/data/epa/main.py:4,43
   - src/google/storage.py:12,175,188,192,204,365
   - src/site/team_year.py:7,22
