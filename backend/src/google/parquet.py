@@ -14,8 +14,13 @@ from src.db.models.team_event import TeamEventORM
 from src.db.models.team_year import TeamYearORM
 from src.db.models.year import YearORM
 from src.db_duckdb.schema import PARQUET_PREFIX, columns, to_row
-from src.google.publish import content_hash, versioned_key
-from src.google.storage import IMMUTABLE_CACHE, _bucket, read_manifest, write_manifest
+from src.google.publish import Manifest, content_hash, versioned_key
+from src.google.storage import (
+    IMMUTABLE_CACHE,
+    _bucket,
+    read_manifest,
+    update_manifest,
+)
 
 ARROW_TYPES = {
     "int": pa.int64(),
@@ -66,14 +71,13 @@ def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
     # Standalone path for historical (non-current) years, which publish parquet
     # without a co-occurring site-blob publish. The current-year cycle folds parquet
     # into the single site manifest write (see storage.write_objs).
-    manifest = read_manifest()
-    if manifest is None:
-        print("skipped parquet manifest update: manifest unavailable")
-        return
-
+    #
+    # A missing manifest is created (an empty bucket must not silently drop the
+    # year's tables); a ManifestReadError propagates and nothing is written.
     bucket = _bucket()
-    blobs = dict(manifest.blobs)
-    changed = False
+    manifest = read_manifest(bucket) or Manifest()
+
+    updates: Dict[str, str] = {}
     for logical, data in build_parquet_uploads(year, objs, teams).items():
         digest = content_hash(data)
         if manifest.hash_for(logical) == digest:
@@ -82,9 +86,7 @@ def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
         blob = bucket.blob(key)
         blob.cache_control = IMMUTABLE_CACHE
         blob.upload_from_string(data, "application/octet-stream")
-        blobs[logical] = key
-        changed = True
+        updates[logical] = key
 
-    if changed:
-        manifest.blobs = blobs
-        write_manifest(manifest, bucket)
+    if updates:
+        update_manifest(lambda m: m.blobs.update(updates), bucket)

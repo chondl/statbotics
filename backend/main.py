@@ -73,8 +73,10 @@ async def read_root():
 @router.get("/info")
 def get_info():
     from src.data import main as data_main
+    from src.google import storage as gcs_storage
 
     return {
+        "MANIFEST_CONFLICTS": gcs_storage.manifest_conflicts,
         "PROD": PROD,
         "PYTHON_VERSION": platform.python_version(),
         "SEED_INCOMPLETE": data_main.seed_incomplete,

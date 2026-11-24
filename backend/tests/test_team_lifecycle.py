@@ -600,14 +600,17 @@ def test_publish_team_artifacts_targets_exactly_affected(monkeypatch):
 
     assert len(plans) == 1
     plan = plans[0]
+    # What update_manifest commits: the plan's delta over the previous manifest.
+    committed = deepcopy(prev)
+    plan.apply(committed)
     # Renders exactly teams/all + the changed team blob.
     assert set(plan.legacy_uploads) == {"teams/all", "team/254"}
     # The teams Parquet table rides the same manifest write.
-    assert parquet_logical(YEAR, "teams") in plan.manifest.blobs
+    assert parquet_logical(YEAR, "teams") in plan.blob_updates
     # Everything else is carried forward untouched.
-    assert plan.manifest.blobs["events/all"] == "v2/events/all.aaa"
-    assert plan.manifest.blobs["team/1678"] == "v2/team/1678.bbb"
-    assert plan.manifest.blobs[parquet_logical(YEAR, "matches")] == "v2/parquet.ccc"
+    assert committed.blobs["events/all"] == "v2/events/all.aaa"
+    assert committed.blobs["team/1678"] == "v2/team/1678.bbb"
+    assert committed.blobs[parquet_logical(YEAR, "matches")] == "v2/parquet.ccc"
 
 
 def test_publish_team_artifacts_team_blob_embeds_team_years(monkeypatch):

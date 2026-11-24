@@ -29,29 +29,9 @@ from src.site.event import _read_event, _read_events
 from src.site.team import _read_team_year
 from src.site.team_year import _read_team_years
 from src.types.enums import CompLevel, EventStatus, MatchStatus, MatchWinner
+from tests.fake_gcs import FakeBucket
 
 YEAR = 2025
-
-
-class FakeBlob:
-    def __init__(self, bucket: "FakeBucket", name: str):
-        self.bucket = bucket
-        self.name = name
-        self.cache_control = None
-
-    def exists(self) -> bool:
-        return self.name in self.bucket.objects
-
-    def upload_from_string(self, data: bytes, content_type: str = "") -> None:
-        self.bucket.objects[self.name] = data
-
-
-class FakeBucket:
-    def __init__(self):
-        self.objects: Dict[str, bytes] = {}
-
-    def blob(self, name: str) -> FakeBlob:
-        return FakeBlob(self, name)
 
 
 def make_match(key, event, red, blue, time):
@@ -223,8 +203,8 @@ def test_write_hist_blobs_sets_immutable_cache_control(monkeypatch):
     seen: List[Any] = []
     real_blob = FakeBucket.blob
 
-    def spy_blob(self, name):
-        b = real_blob(self, name)
+    def spy_blob(self, name, generation=None):
+        b = real_blob(self, name, generation)
         seen.append(b)
         return b
 

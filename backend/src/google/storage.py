@@ -4,10 +4,11 @@ import zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 import orjson
 
+from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
 from src.constants import CURR_YEAR, HIST_EPOCH, PROD
 from src.data.backend import get_events as get_events_db
@@ -82,28 +83,113 @@ def _best_effort(label: str, fn: Callable[[], T], default: T) -> T:
         return default
 
 
-def read_manifest() -> Optional[Manifest]:
+class ManifestReadError(Exception):
+    """manifest.json exists (or may exist) but could not be read or parsed.
+    Writers must abort: planning from an empty manifest would erase
+    hist_epochs and every carried-forward blob entry."""
+
+
+class ManifestConflictError(Exception):
+    """update_manifest lost the generation race on every attempt."""
+
+
+# Conditional-write retries after the first attempt (spec §9: bounded, then
+# fail loudly into /info).
+MANIFEST_RETRIES = 5
+# update_manifest calls that exhausted their retries since process start.
+manifest_conflicts = 0
+
+
+def _parse_manifest(raw: bytes) -> Manifest:
+    # The object is stored gzip-compressed with Content-Encoding: gzip; the
+    # client normally transcodes, but accept raw gzip bytes too.
     try:
-        raw = _bucket().blob(MANIFEST_OBJECT).download_as_bytes()
-    except Exception:
-        return None
-    try:
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
         return Manifest.from_json(raw)
-    except Exception:
+    except Exception as e:
+        raise ManifestReadError(f"manifest unparseable: {e}") from e
+
+
+def read_manifest(bucket: Any = None) -> Optional[Manifest]:
+    """The live manifest; None only when it does not exist. Any other failure
+    raises ManifestReadError (fail closed)."""
+    try:
+        bucket = bucket or _bucket()
+        raw = bucket.blob(MANIFEST_OBJECT).download_as_bytes()
+    except NotFound:
         return None
+    except Exception as e:
+        raise ManifestReadError(f"manifest read failed: {e}") from e
+    return _parse_manifest(raw)
 
 
-def write_manifest(manifest: Manifest, bucket: Any = None) -> None:
+def _read_manifest_pinned(bucket: Any) -> Optional[Tuple[Manifest, int]]:
+    """(manifest, generation) read pinned to one generation, (Manifest(), 0)
+    when absent, or None when the pinned generation vanished (retry)."""
+    try:
+        live = bucket.get_blob(MANIFEST_OBJECT)
+    except Exception as e:
+        raise ManifestReadError(f"manifest metadata read failed: {e}") from e
+    if live is None:
+        return Manifest(), 0
+    generation = live.generation
+    try:
+        raw = bucket.blob(MANIFEST_OBJECT, generation=generation).download_as_bytes()
+    except NotFound:
+        return None
+    except Exception as e:
+        raise ManifestReadError(f"manifest read failed: {e}") from e
+    return _parse_manifest(raw), generation
+
+
+def update_manifest(
+    mutate: Callable[[Manifest], None], bucket: Any = None
+) -> Manifest:
+    """The only way manifest.json is written. Reads one pinned generation,
+    applies ``mutate`` (must be idempotent: it is re-applied to a fresh copy
+    on every retry), stamps cycle and the global hist_epoch, drops
+    hist_epochs entries the global epoch supersedes, and writes with
+    if_generation_match. Retries MANIFEST_RETRIES times on a lost race, then
+    raises ManifestConflictError."""
+    global manifest_conflicts
     bucket = bucket or _bucket()
-    blob = bucket.blob(MANIFEST_OBJECT)
-    blob.cache_control = MANIFEST_CACHE
-    blob.content_encoding = "gzip"
-    blob.upload_from_string(
-        gzip.compress(manifest.to_json().encode("utf-8")), "application/json"
+    for _ in range(1 + MANIFEST_RETRIES):
+        pinned = _read_manifest_pinned(bucket)
+        if pinned is None:
+            continue
+        manifest, generation = pinned
+        prev_epoch = manifest.hist_epoch
+        mutate(manifest)
+        manifest.cycle = datetime.now(timezone.utc).isoformat()
+        manifest.hist_epoch = max(prev_epoch, HIST_EPOCH)
+        manifest.hist_epochs = {
+            y: e for y, e in manifest.hist_epochs.items() if e > manifest.hist_epoch
+        }
+
+        blob = bucket.blob(MANIFEST_OBJECT)
+        blob.cache_control = MANIFEST_CACHE
+        blob.content_encoding = "gzip"
+        try:
+            blob.upload_from_string(
+                gzip.compress(manifest.to_json().encode("utf-8")),
+                "application/json",
+                if_generation_match=generation,
+            )
+        except PreconditionFailed:
+            continue
+        return manifest
+    manifest_conflicts += 1
+    raise ManifestConflictError(
+        f"manifest write lost the generation race {1 + MANIFEST_RETRIES} times"
     )
 
 
-def _publish(plan: UploadPlan) -> None:
+def _publish(
+    plan: UploadPlan, mutate: Optional[Callable[[Manifest], None]] = None
+) -> Manifest:
+    """Upload the plan's objects, then commit its manifest delta (plus any
+    extra ``mutate``, applied after the delta) in one update_manifest."""
     bucket = _bucket()
 
     jobs: List[Any] = []
@@ -117,7 +203,26 @@ def _publish(plan: UploadPlan) -> None:
             list(executor.map(lambda job: _upload_bytes(bucket, *job), jobs))
 
     # manifest is written last so readers always resolve a complete blob set
-    write_manifest(plan.manifest, bucket)
+    def apply(manifest: Manifest) -> None:
+        plan.apply(manifest)
+        if mutate is not None:
+            mutate(manifest)
+
+    return update_manifest(apply, bucket)
+
+
+def _fold_parquet(
+    plan: UploadPlan, prev: Optional[Manifest], parquet: Dict[str, bytes]
+) -> None:
+    """Add Parquet tables whose digest changed to the plan's uploads and
+    manifest delta."""
+    prev_manifest = prev or Manifest()
+    for logical, data in parquet.items():
+        digest = content_hash(data)
+        if prev_manifest.hash_for(logical) != digest:
+            key = versioned_key(logical, digest)
+            plan.uploads[key] = data
+            plan.blob_updates[logical] = key
 
 
 def _team_render_set(
@@ -206,6 +311,8 @@ def write_objs(
     add(f"events/{year}", _read_events(year_obj, events))
 
     # event/{event.key}
+    # A ManifestReadError propagates and aborts the cycle: the event and team
+    # gates would otherwise treat every blob as unpublished.
     prev = read_manifest()
     prev_blobs = prev.blobs if prev else {}
     event_to_matches = defaultdict(list)
@@ -314,18 +421,12 @@ def write_objs(
             )
 
     cycle = datetime.now(timezone.utc).isoformat()
-    plan = plan_uploads(rendered, prev, cycle, hist_epoch=HIST_EPOCH)
+    plan = plan_uploads(rendered, prev, cycle)
     if parquet:
         # Fold parquet into the same manifest so the cycle writes it exactly once,
         # last: DuckDB and the frontend never disagree by a cycle, and a partial
         # read can never clobber the site-blob references.
-        prev_manifest = prev or Manifest()
-        for logical, data in parquet.items():
-            digest = content_hash(data)
-            key = versioned_key(logical, digest)
-            if prev_manifest.hash_for(logical) != digest:
-                plan.uploads[key] = data
-            plan.manifest.blobs[logical] = key
+        _fold_parquet(plan, prev, parquet)
     _publish(plan)
 
     return
@@ -357,19 +458,18 @@ def publish_team_artifacts(
             _read_team(team_obj, team_years_by_team.get(num, []))
         )
 
+    # A ManifestReadError propagates: refresh_teams aborts rather than
+    # planning from an empty manifest.
     prev = read_manifest()
     cycle = datetime.now(timezone.utc).isoformat()
-    plan = plan_uploads(rendered, prev, cycle, hist_epoch=HIST_EPOCH)
+    plan = plan_uploads(rendered, prev, cycle)
 
-    prev_manifest = prev or Manifest()
-    logical = parquet_logical(CURR_YEAR, "teams")
     team_rows: List[Any] = list(teams)
-    data = serialize_table(team_rows, TeamORM)
-    digest = content_hash(data)
-    key = versioned_key(logical, digest)
-    if prev_manifest.hash_for(logical) != digest:
-        plan.uploads[key] = data
-    plan.manifest.blobs[logical] = key
+    _fold_parquet(
+        plan,
+        prev,
+        {parquet_logical(CURR_YEAR, "teams"): serialize_table(team_rows, TeamORM)},
+    )
 
     _publish(plan)
 
@@ -378,8 +478,17 @@ def gc_versioned_blobs(
     grace_hours: int = GC_GRACE_HOURS, dry_run: bool = False
 ) -> Dict[str, Any]:
     bucket = _bucket()
-    manifest = read_manifest()
-    referenced = set(manifest.blobs.values()) if manifest else set()
+    # Fail closed: without a readable manifest nothing is provably
+    # unreferenced, so delete nothing.
+    try:
+        manifest = read_manifest(bucket)
+    except ManifestReadError as e:
+        print(f"GC {VERSION_PREFIX}/: refused, {e}")
+        return {"status": "refused", "reason": str(e)}
+    if manifest is None:
+        print(f"GC {VERSION_PREFIX}/: refused, no manifest")
+        return {"status": "refused", "reason": "no manifest"}
+    referenced = set(manifest.blobs.values())
     cutoff = datetime.now(timezone.utc) - timedelta(hours=grace_hours)
 
     scanned = 0
@@ -439,7 +548,7 @@ def write_hist_blobs(year: int, objs: objs_type, teams: List[Team]) -> int:
     alone. To force a full re-export (rendering or data changed for
     already-exported blobs), bump HIST_EPOCH in src/constants.py and rerun.
     The manifest is never touched here: its hist_epoch stamp is maintained
-    by every current-year publish (plan_uploads(hist_epoch=HIST_EPOCH)),
+    by every manifest write (update_manifest stamps max(prev, HIST_EPOCH)),
     and hist objects are resolved by path, not through manifest.blobs.
 
     Uploads are independent single objects, so they run through a thread

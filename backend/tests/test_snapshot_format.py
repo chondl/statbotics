@@ -11,6 +11,7 @@ import src.google.snapshot as snap
 from src.db.models import ETag, Event, Match, Team, TeamEvent, TeamYear, Year
 from src.types.enums import (CompLevel, EventStatus, EventType, MatchStatus,
                              MatchWinner)
+from tests.fake_gcs import FakeBucket
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
@@ -135,24 +136,10 @@ def test_deserialize_rejects_unknown_magic():
         snap.deserialize(b"not a snapshot")
 
 
-class FakeBlob:
-    def __init__(self, raw):
-        self.raw = raw
-
-    def download_as_bytes(self):
-        return self.raw
-
-
-class FakeBucket:
-    def __init__(self, raw):
-        self.raw = raw
-
-    def blob(self, key):
-        return FakeBlob(self.raw)
-
-
 def patch_bucket(monkeypatch, raw):
-    monkeypatch.setattr(snap, "_bucket", lambda: FakeBucket(raw))
+    bucket = FakeBucket()
+    bucket.objects[snap.snapshot_key(2026)] = raw
+    monkeypatch.setattr(snap, "_bucket", lambda: bucket)
 
 
 def new_format_blob(schema=None, fingerprint=None):

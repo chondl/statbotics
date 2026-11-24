@@ -1,0 +1,15 @@
+[
+  {"path": "event/2026mmr", "year": 2026},
+  {"path": "events/2026", "year": 2026},
+  {"path": "team_years/2026", "year": 2026},
+  {"path": "team_years/2026.limit=100.metric=epa", "year": 2026},
+  {"path": "noteworthy_matches/2026", "year": 2026},
+  {"path": "team/6238/2026", "year": 2026},
+  {"path": "team/6238/years", "year": null},
+  {"path": "team/6238", "year": null},
+  {"path": "teams/all", "year": null},
+  {"path": "events/all", "year": null},
+  {"path": "team_to_events", "year": null},
+  {"path": "upcoming_matches.limit=20.metric=max_epa", "year": null},
+  {"path": "parquet/2026/team_years.parquet", "year": 2026}
+]
