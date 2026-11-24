@@ -139,10 +139,25 @@ showed no offseason events at all.
 
 Bumping invalidates *every* year, not just the one you changed. That is safe:
 years missing from the new epoch fall back to the site API, which serves the
-same data from Parquet, and the daily TBA sweep re-exports one year per run
-until the epoch refills. Expect a stretch of API-served (slower, not wrong)
-historical pages afterward; a full backfill is only worth it if you cannot
-wait.
+same data from Parquet. The daily TBA sweep does **not** refill the new epoch:
+`revalidate_tba` reprocesses a year only when a TBA path returned 200
+(`sweep.py`), so an unchanged year stays API-served until something reprocesses
+it.
+
+Two more traps on the same path, found with `2026mmr` after the 2027 rollover:
+
+- **Manifest entries outrank hist blobs.** `resolveBucketUrl` checks
+  `manifest.blobs` first, and `plan_uploads` carries every entry forward. The
+  last current-year cycle of a season leaves that year's `event/*`, `events/Y`
+  and `team_years/Y` entries in the manifest, frozen; no hist blob or epoch
+  bump can override them.
+- **Past-year events are never live.** `get_event_status` (`src/data/tba.py`)
+  uses Upcoming/Ongoing only for `CURR_YEAR`; for an older year an event with
+  no matches is Invalid (dropped from `events/Y`, no team events) and one with
+  matches is Completed (skipped by `check_year_partial`).
+
+The fix is designed in
+[the trailing-year refresh spec](../docs/superpowers/specs/2026-11-24-trailing-year-refresh-design.md).
 
 ## TBA API (`src/tba/`)
 
