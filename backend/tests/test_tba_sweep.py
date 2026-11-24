@@ -111,6 +111,14 @@ def test_normalize_cursor():
     assert sweep.normalize_cursor(2015) == 2015
 
 
+def test_sweep_skips_live_trailing_year(trailing_open):
+    # While the trailing window is open only trailing cycles write the
+    # trailing year: the cursor wraps past it to the oldest year.
+    assert sweep.normalize_cursor(CURR_YEAR - 1) == 2002
+    assert sweep.next_sweep_year(CURR_YEAR - 2) == 2002
+    assert sweep.normalize_cursor(CURR_YEAR - 2) == CURR_YEAR - 2
+
+
 """
 2. Cold-year skip: no manifest -> no TBA requests, cursor still advances
 """

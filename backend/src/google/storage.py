@@ -185,17 +185,24 @@ def update_manifest(
 
 
 def _publish(
-    plan: UploadPlan, mutate: Optional[Callable[[Manifest], None]] = None
+    plan: UploadPlan,
+    mutate: Optional[Callable[[Manifest], None]] = None,
+    legacy: bool = True,
 ) -> Manifest:
     """Upload the plan's objects, then commit its manifest delta (plus any
-    extra ``mutate``, applied after the delta) in one update_manifest."""
+    extra ``mutate``, applied after the delta) in one update_manifest. An
+    exception raised by ``mutate`` aborts the manifest write.
+
+    ``legacy=False`` skips the plan's unversioned logical copies: a trailing
+    publish writes only versioned ``v2/`` objects."""
     bucket = _bucket()
 
     jobs: List[Any] = []
     for versioned, data in plan.uploads.items():
         jobs.append((versioned, data, IMMUTABLE_CACHE))
-    for logical, data in plan.legacy_uploads.items():
-        jobs.append((logical, data, None))
+    if legacy:
+        for logical, data in plan.legacy_uploads.items():
+            jobs.append((logical, data, None))
 
     if jobs:
         with ThreadPoolExecutor() as executor:

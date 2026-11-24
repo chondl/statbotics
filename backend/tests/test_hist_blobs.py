@@ -290,12 +290,20 @@ def test_process_year_publishes_no_hist_blobs_for_live_trailing_year(
     monkeypatch.setattr(
         data_main, "publish_past_year", lambda *a: calls.append("publish")
     )
+    # The live branch publishes through the manifest instead (tested in
+    # tests/test_trailing_cycle.py).
+    live: List[str] = []
+    monkeypatch.setattr(
+        data_main, "trailing_publish", lambda *a: live.append("trailing") or False
+    )
+    monkeypatch.setattr(data_main, "write_snapshot", lambda *a: live.append("snapshot"))
     assert data_main.trailing.is_live_year(year)
 
     teams = [Team(team=254, name="The Cheesy Poofs", rookie_year=1999)]
     data_main.process_year(year, False, False, True, teams, create_objs(year), {})
 
     assert calls == []
+    assert live == ["trailing", "snapshot"]
 
 
 def test_dbless_prior_year_seeding_reads_backend(monkeypatch):

@@ -1,11 +1,17 @@
+import threading
+import time
 import traceback
 from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Dict, Iterator, List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
-from src.constants import CURR_YEAR, DISABLE_GCS
+import requests
+
+from src.constants import BACKEND_URL, CURR_YEAR, DISABLE_GCS
 from src.data import trailing
+from src.data.pipeline_lock import try_hold
 from src.data.avg import process_year as process_year_avg
 from src.data.backend import get_team_event_teams as get_team_event_teams_db
 from src.data.backend import get_team_years as get_team_years_db
@@ -20,11 +26,19 @@ from src.data.wins import post_process as post_process_wins
 from src.data.wins import process_year as process_year_wins
 from src.data.wins import winrate
 from src.db.models import Team, TeamYear
-from src.google.parquet import build_parquet_uploads, write_parquet
+from src.google.parquet import build_parquet_uploads, parquet_logical, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
 from src.google.storage import publish_team_artifacts, render_site_blobs
+from src.google.storage import read_manifest, update_manifest
 from src.google.storage import write_objs as write_objs_storage
+from src.google.trailing_publish import (
+    stamp_trailing_bootstrap,
+    team_years_digest,
+    trailing_publish,
+    write_trailing_status,
+)
 from src.google.year_epoch import publish_past_year
+from src.google.year_path import year_from_path
 from src.tba import cache as tba_cache
 from src.tba.clean_data import clean_district
 
@@ -43,6 +57,11 @@ publish_skipped = False
 # _update_curr_year. Cleared by the next partial cycle that reads the
 # snapshot successfully. Surfaced via /info so it is not silent.
 partial_skipped = False
+
+# Whether the last trailing publish (process_year's live non-current branch)
+# changed parquet/{year}/team_years; update_trailing_year reads it to decide
+# the chained current-year re-render.
+trailing_team_years_changed = False
 
 
 @contextmanager
@@ -159,7 +178,22 @@ def process_year(
     # never leave a past-year page stale. A live year (the trailing year while
     # its window is open) never reaches this branch: publish_past_year
     # refuses it.
-    if not curr_year_gcs and not DISABLE_GCS and not trailing.is_live_year(year_num):
+    #
+    # A live non-current year (the trailing year while its window is open)
+    # publishes like the current year instead: its site blobs and Parquet go
+    # out as versioned objects in ONE manifest write (the trailing publish),
+    # and the snapshot follows (blobs/manifest first, snapshot last). No hist
+    # blob is written for it.
+    live_year = trailing.is_live_year(year_num)
+    if not curr_year_gcs and not DISABLE_GCS and live_year:
+        global trailing_team_years_changed
+        trailing_team_years_changed = trailing_publish(year_num, objs, teams)
+        timer.print(str(year_num) + " Trailing Publish")
+
+        write_snapshot(year_num, objs, teams)
+        timer.print(str(year_num) + " Write Snapshot")
+
+    if not curr_year_gcs and not DISABLE_GCS and not live_year:
         write_parquet(year_num, objs, teams)
         timer.print(str(year_num) + " Write Parquet")
 
@@ -293,6 +327,14 @@ def update_curr_year(partial: bool, tba_partial: bool, refresh_tba: bool = False
 
 
 def _update_curr_year(partial: bool, tba_partial: bool):
+    with try_hold() as held:
+        if not held:
+            print("PIPELINE BUSY: skipped update_curr_year")
+            return
+        _update_curr_year_held(partial, tba_partial)
+
+
+def _update_curr_year_held(partial: bool, tba_partial: bool):
     year = CURR_YEAR
     timer = Timer()
 
@@ -413,7 +455,15 @@ def reprocess_year(year_num: int) -> None:
       REPROCESS_DRIVER note in the Makefile).
 
     Runs synchronously in-request like reset_curr_year; minutes, acceptable
-    for the scheduled daily sweep."""
+    for the scheduled daily sweep.
+
+    A live trailing year is not a past year: it delegates to a full
+    trailing cycle (update_trailing_year), which publishes through the
+    manifest and chains the current-year re-render itself when needed."""
+    if year_num != CURR_YEAR and trailing.is_live_year(year_num):
+        update_trailing_year(full=True)
+        return
+
     timer = Timer()
     teams = load_teams_tba(cache=True)
     process_year(year_num, False, False, True, teams, create_objs(year_num), None)
@@ -424,7 +474,7 @@ def reprocess_year(year_num: int) -> None:
     timer.print("Chained Curr-Year Re-render")
 
 
-def refresh_teams() -> Dict[str, int]:
+def refresh_teams() -> Dict[str, Any]:
     """Refresh all stale team fields from TBA and recompute win records.
 
     DB retirement Phase 1 item 4: the staleness diff is computed from the
@@ -433,6 +483,14 @@ def refresh_teams() -> Dict[str, int]:
     changed team/{num} blobs, and the snapshot's teams. Scheduled daily
     (statbotics-refresh-teams) so no operator action is ever needed to keep
     team fields current with TBA."""
+    with try_hold() as held:
+        if not held:
+            print("PIPELINE BUSY: skipped refresh_teams")
+            return {"status": "busy"}
+        return _refresh_teams_held()
+
+
+def _refresh_teams_held() -> Dict[str, Any]:
     timer = Timer()
 
     fresh_teams = load_teams_tba(cache=False)
@@ -532,3 +590,176 @@ def refresh_teams() -> Dict[str, int]:
             timer.print("Write Snapshot")
     timer.print(f"Publish Teams ({len(teams_to_update)} rows)")
     return {"teams_updated": len(teams_to_update)}
+
+
+# ------------------------------------------------------------------------
+# Trailing year (trailing-year refresh spec §5.2, §6, §7)
+# ------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _secs(start: float) -> int:
+    return int(round(time.monotonic() - start))
+
+
+def _schedule_reset_curr_year() -> None:
+    """Chain a full current-year re-render plus refresh_teams as its OWN
+    request (GET /v3/data/reset_curr_year), from a daemon thread started
+    after the pipeline lock is released. The short read timeout only frees
+    this thread; the server-side request runs on."""
+
+    def call() -> None:
+        try:
+            requests.get(f"{BACKEND_URL}/v3/data/reset_curr_year", timeout=(5, 5))
+        except requests.exceptions.ReadTimeout:
+            pass
+        except Exception:
+            traceback.print_exc()
+
+    threading.Thread(target=call, name="chain-reset-curr-year", daemon=True).start()
+
+
+def update_trailing_year(full: bool) -> Dict[str, Any]:
+    """One trailing cycle for the trailing year (spec §5.2). Returns
+    {"status": "busy"} without waiting when another pipeline holds the
+    lock."""
+    with try_hold() as held:
+        if not held:
+            print("PIPELINE BUSY: skipped update_trailing_year")
+            return {"status": "busy"}
+        result = _update_trailing_year_held(full)
+    # After the lock is released, or the chained cycle would skip as busy.
+    if result.get("chain"):
+        _schedule_reset_curr_year()
+    return result
+
+
+def _update_trailing_year_held(full: bool) -> Dict[str, Any]:
+    global trailing_team_years_changed
+    year = trailing.trailing_year()
+    if not trailing.is_live_year(year):
+        print(f"TRAILING {year}: window closed; trailing cycle skipped")
+        return {"status": "skipped", "reason": "window-closed", "year": year}
+
+    start = time.monotonic()
+    objs: Optional[objs_type] = None
+    teams: Optional[List[Team]] = None
+    if not full:
+        loaded = read_snapshot(year)
+        if loaded is None:
+            print(f"TRAILING {year}: snapshot unreadable; escalating to full")
+            full = True
+        else:
+            objs, teams = loaded
+
+    status: Dict[str, Any] = {
+        "year": year,
+        "state": "running",
+        "full": full,
+        "started": _now_iso(),
+        "finished": None,
+        "error": None,
+    }
+    write_trailing_status(status)
+    trailing_team_years_changed = False
+    try:
+        if full or objs is None or teams is None:
+            # Full trailing cycles fetch TBA fresh (no etag trust).
+            teams = load_teams_tba(cache=False)
+            objs = create_objs(year)
+        # The live non-current branch of process_year runs the trailing
+        # publish, then writes the trailing snapshot.
+        process_year(year, not full, not full, not full, teams, objs, None)
+        if full:
+            stamp_trailing_bootstrap(year)
+    except Exception as e:
+        status.update(state="error", finished=_now_iso(), error=f"{type(e).__name__}: {e}")
+        write_trailing_status(status)
+        raise
+
+    status.update(state="ok", finished=_now_iso())
+    write_trailing_status(status)
+    print(f"TRAILING {year} CYCLE COMPLETE full={int(full)} secs={_secs(start)}")
+    return {
+        "status": "success",
+        "year": year,
+        "full": full,
+        "chain": trailing_team_years_changed,
+    }
+
+
+def close_needed(manifest: Optional[Any], year: int) -> bool:
+    """Window close still has work: the manifest names a trailing year, or
+    holds any non-Parquet year key of ``year``. (The window check is the
+    caller's.)"""
+    if manifest is None:
+        return False
+    if manifest.trailing_year is not None:
+        return True
+    return any(
+        year_from_path(k) == year and not k.startswith("parquet/")
+        for k in manifest.blobs
+    )
+
+
+def close_trailing_year() -> Dict[str, Any]:
+    """Window close (spec §7, with the plan's past-year deviation): retire
+    the trailing year into an ordinary past year. Stateless and rerunnable:
+    every step is idempotent, so a run that dies is completed by the next."""
+    with try_hold() as held:
+        if not held:
+            print("PIPELINE BUSY: skipped close_trailing_year")
+            return {"status": "busy"}
+        result = _close_trailing_year_held()
+    if result.get("chain"):
+        _schedule_reset_curr_year()
+    return result
+
+
+def _close_trailing_year_held() -> Dict[str, Any]:
+    year = trailing.trailing_year()
+    start = time.monotonic()
+
+    # A ManifestReadError propagates: without the manifest, nothing is known.
+    manifest = None if trailing.trailing_window_open() else read_manifest()
+    if trailing.trailing_window_open() or not close_needed(manifest, year):
+        print(f"TRAILING {year} CLOSE not_needed secs={_secs(start)}")
+        return {"status": "not_needed", "year": year}
+    assert manifest is not None
+    before = manifest.hash_for(parquet_logical(year, "team_years"))
+
+    status: Dict[str, Any] = {
+        "year": year,
+        "state": "running",
+        "full": True,
+        "started": _now_iso(),
+        "finished": None,
+        "error": None,
+    }
+    write_trailing_status(status)
+    try:
+        # Final full cycle with PAST-year semantics (the window is closed, so
+        # the year is no longer live): fresh TBA, then the past-year branch —
+        # write_parquet, then publish_past_year, which advances the year
+        # epoch on any change and removes the year's non-Parquet keys.
+        teams = load_teams_tba(cache=False)
+        process_year(year, False, False, False, teams, create_objs(year), None)
+
+        def clear(m: Any) -> None:
+            m.trailing_year = None
+
+        update_manifest(clear)
+        after = team_years_digest(year)
+    except Exception as e:
+        status.update(state="error", finished=_now_iso(), error=f"{type(e).__name__}: {e}")
+        write_trailing_status(status)
+        print(f"TRAILING {year} CLOSE error secs={_secs(start)}")
+        raise
+
+    status.update(state="ok", finished=_now_iso())
+    write_trailing_status(status)
+    print(f"TRAILING {year} CLOSE closed secs={_secs(start)}")
+    return {"status": "closed", "year": year, "chain": after != before}
