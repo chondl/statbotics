@@ -116,8 +116,9 @@ Deploying code does **not** re-ingest data. Choose the smallest rebuild:
 | Situation | Command | Why |
 |---|---|---|
 | New/changed **current-year** events (e.g. offseason events on TBA) | `make reprocess-curr-year` | Full current-year recompute, fresh TBA fetch (no etag gating). ~4–6 min. |
-| One **historical** year changed (e.g. re-ingest 2025 with offseason support) | `make reprocess-year YEAR=2025` | Cloud Run job running `reprocess_year()`: `process_year(partial=False)` + Parquet + hist blobs + chained current-year re-render. Targeted; avoids a full rebuild. |
-| Full history from scratch | [historical-backfill.md](../../deliverables/historical-backfill.md) | Db-less `reset_all_years`: one pass emits every year's Parquet + hist blobs + the current-year publish. No DB build/reseed. |
+| One **past** year changed (e.g. re-ingest 2025 with offseason support) | `make reprocess-year YEAR=2025` | Cloud Run job running `reprocess_year()`: `process_year(partial=False)` + Parquet + `publish_past_year` + chained current-year re-render. Any changed page moves the year to a new **year epoch**, so the pages update with no `HIST_EPOCH` bump. Targeted; avoids a full rebuild. |
+| The **trailing year** (`CURR_YEAR − 1`) while the trailing window is open (until Dec 28 00:00 PT) | Nothing — the gate runs trailing cycles and window close | The hourly cron and pings refresh it like the current year ([DATA-REFRESH.md §3](../DATA-REFRESH.md#c-the-trailing-year--trailing-cycles)). `make reprocess-year` of it runs a full trailing cycle instead of the past-year path. `make verify-trailing YEAR= EVENT=` checks one event's page against the API. |
+| Full history from scratch | [historical-backfill.md](../../deliverables/historical-backfill.md) | Db-less `reset_all_years`: one pass emits every year's Parquet + site blobs under its year epoch + the current-year publish. No DB build/reseed. |
 
 The hourly cron **does** pick up genuinely new TBA events on its own (the
 `{year}/events` etag changes). The one gap is a *post-deploy backfill*: events
@@ -126,12 +127,20 @@ cron's pre-check sees nothing new — run `make reprocess-curr-year` once to for
 fresh full ingest. How and when refresh happens is documented in full in
 [DATA-REFRESH.md](../DATA-REFRESH.md).
 
-Pause schedulers around a manual rebuild so their manifest writes cannot race the
-rebuild's (`reprocess-year` does this automatically):
+Pause schedulers around a manual rebuild (`reprocess-year` does this
+automatically). Concurrent manifest writers no longer erase each other's
+entries (every write carries the manifest precondition), but pausing keeps a
+scheduled cycle from skipping as busy or doubling the work:
 
 ```
 make pause-cron && make reprocess-curr-year && make resume-cron
 ```
+
+Before a deploy that changes how the manifest is written, take
+`make manifest-backup` (copies `manifest.json` to
+`backups/manifest.<UTC timestamp>.json` and prints the source generation).
+After one that touches the pipeline, `MIN=30 make pipeline-errors` lists
+backend Tracebacks and gunicorn `WORKER TIMEOUT`s.
 
 ## 4. Offseason & freshness (feature reference)
 
@@ -208,8 +217,14 @@ Component **contracts** — swap any implementation that satisfies these:
 3. **Blob store.** Public-read, S3-compatible. Backend writes with
    `google-cloud-storage`: a short-TTL `manifest.json` written **last** each
    cycle, immutable `v2/{logical}.{hash}` blobs, legacy unversioned paths, and
-   `hist/{epoch}/{logical}` backfill blobs. Readers resolve logical paths through
-   the manifest. Needs CORS for the frontend origin.
+   immutable `hist/{epoch}/{logical}` site blobs for past years. Readers
+   resolve logical paths through the manifest: a `blobs` entry wins, else
+   `hist/{year epoch}/{logical}`, where the year epoch is
+   `max(hist_epochs[year] ?? 0, hist_epoch)`. The manifest also carries
+   `trailing_year` (the trailing year while its window is open, else `null`).
+   Every manifest write is conditional on the generation read
+   (`if_generation_match`), so the store must support compare-and-swap
+   writes. Needs CORS for the frontend origin.
 4. **Frontend container.** Next.js 13 `next build` → `next start` (server mode,
    **not** `next export`). `BACKEND_URL` + `BUCKET_URL` are **inlined at build
    time** (Next `env` block) — set as build args, not runtime env. Needs

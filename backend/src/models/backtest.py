@@ -32,7 +32,7 @@ from src.db.models.year import YearORM
 from src.db_duckdb.schema import columns, from_row
 from src.google.parquet import parquet_logical
 from src.google.snapshot import read_snapshot
-from src.google.storage import _bucket, read_manifest
+from src.google.storage import ManifestReadError, _bucket, read_manifest
 from src.models.template import Model
 from src.types.enums import EventType, MatchStatus, MatchWinner
 
@@ -133,7 +133,10 @@ def _read_parquet_table(year: int, table: str) -> List[Dict]:
 
     import pyarrow.parquet as pq
 
-    manifest = read_manifest()
+    try:
+        manifest = read_manifest()
+    except ManifestReadError as e:
+        raise SystemExit(f"manifest unreadable: {e}")
     if manifest is None:
         raise SystemExit("no manifest in the bucket")
     key = manifest.blobs.get(parquet_logical(year, table))

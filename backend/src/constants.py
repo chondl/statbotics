@@ -24,12 +24,18 @@ AUTH_KEY_BLACKLIST: List[str] = []
 
 CURR_YEAR = 2027
 DISABLE_GCS = False
-# Bumped to 2 on 2026-07-30: hist blobs are immutable within an epoch, so the
-# 2025 historical blobs still held pre-offseason renders -- team pages for
-# past years showed no offseason events even after reprocess-year recomputed
-# them correctly. Bumping forces a re-export. Years not yet re-exported into
-# the new epoch fall back to the site API, which serves the same data from
-# Parquet, and the daily TBA sweep refills them one year per run.
+# The GLOBAL hist epoch, stamped into the manifest's hist_epoch. A past year
+# resolves under its year epoch, max(manifest hist_epochs[year] ?? 0,
+# hist_epoch) (src/google/year_path.py). A data change to a past year no
+# longer needs a bump: year_epoch.publish_past_year moves just that year to a
+# new year epoch. Bump this only for a renderer change across all years, and
+# then to at least /info HIST_EPOCH_NEXT_MIN (above max(hist_epochs)), or the
+# years already advanced keep their older render. Years not yet re-exported into a new
+# global epoch fall back to the site API, which serves the same data from
+# Parquet; the daily TBA sweep does NOT refill them (it reprocesses a year
+# only on a TBA 200).
+# Bumped to 2 on 2026-07-30: the 2025 hist blobs still held pre-offseason
+# renders, then immutable within an epoch.
 HIST_EPOCH = 2
 
 # There is no relational database. Serving and persistence are

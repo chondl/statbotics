@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
-from src.constants import CURR_YEAR
+from src.data import trailing
 from src.data.utils import objs_type
 from src.db.models import ETag, Event, Team, TeamEvent, TeamYear, match_dict_to_objs
 from src.tba import cache as tba_cache
@@ -89,7 +89,7 @@ def get_event_status(matches: List[MatchDict], year: int) -> EventStatus:
     finals_finished = num_upcoming_matches == 0 or max_finals_winner >= 2
 
     event_status: EventStatus = EventStatus.COMPLETED
-    if year == CURR_YEAR:
+    if trailing.is_live_year(year):
         if num_matches == 0:
             event_status = EventStatus.UPCOMING
         elif not elim_started or not finals_finished:
@@ -300,7 +300,7 @@ def process_year(
             status=curr_status,
         )
 
-    full_curr_year = not partial and year_num == CURR_YEAR
+    full_live_year = not partial and trailing.is_live_year(year_num)
 
     for event_obj in event_objs_dict.values():
         event_key, event_time = event_obj.key, event_obj.time
@@ -332,7 +332,7 @@ def process_year(
             # Active-window paths always revalidate; partial cycles and
             # historical years are unaffected (trust is OR-ed with `cache`).
             return (
-                full_curr_year
+                full_live_year
                 and not event_active
                 and tba_cache.validated_within(
                     "event/" + event_key + suffix, DAILY_REVALIDATION_HOURS

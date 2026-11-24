@@ -2,7 +2,13 @@
 
 **Date:** 2026-11-24
 **Target:** chondl/statbotics fork → `cph-staging` → mirror (statbotics.popcornpenguins.com)
-**Status:** Draft, adversarially reviewed, awaiting owner approval
+**Status:** Approved; built on `feat/trailing-year-refresh`. Amended during
+the build (Tue 2026-11-24) where the code differs from the draft: §5.2
+(chain transport, no-hist enforcement point, TBA freshness), §5.3 (async
+`isLiveYear`), §6 and §8 (renderer input order), §7 (past-year semantics in
+step 1; chain transport), §10 (new grammars), and after the final review
+§5.2 and §7 again (`chain_pending`, pipeline-busy gate skip). Each amendment is marked
+*Amended* in place.
 **Amends:** [DATA-REFRESH.md](../rig/DATA-REFRESH.md) §1, §3–§7 (refresh covers
 two years during the trailing window); the pre-kickoff rollover steps and the
 "hist blobs are immutable" gotcha in [backend/CLAUDE.md](../../../backend/CLAUDE.md);
@@ -146,29 +152,61 @@ probe, after the current-year probe, only while the trailing window is open:
 
 Escalation self-calls a new `GET /v3/data/update_trailing_year[?full=1]` as a
 background task, like the current-year cycle. A trailing cycle runs
-`process_year(trailing, partial, tba_partial=partial, cache=True, …)` and then:
+`process_year(trailing, partial, tba_partial=partial, cache=partial, …)` and
+then (*Amended:* a full trailing cycle fetches TBA fresh, `cache=False`, and
+loads teams with `load_teams_tba(cache=False)`; a partial one keeps the etag
+cache):
 
 - writes the trailing year's Parquet and its site blobs in **one** manifest
   write (the trailing publish, §6) — not the two separate writes past years
   make today;
 - writes the trailing snapshot after the manifest (blobs/manifest first,
   snapshot last, the current year's invariant);
-- writes **no** hist blobs, enforced in code: `write_hist_blobs` refuses a live
-  year;
+- writes **no** hist blobs, enforced in code (*Amended:* `write_hist_blobs`
+  no longer exists; `year_epoch.publish_past_year`, the only hist writer,
+  raises `ValueError("live year")` for a live year);
 - chains a full current-year re-render plus `refresh_teams` **only if** the
   trailing year's `parquet/Y/team_years` digest changed. This can fire on an
   offseason weekend: a team with no season record (for example a 2027 rookie
   at a 2026 offseason event) gets a TeamYear and shifts ranks and percentiles
   (`tba.py:491-513`, `agg.py:94-101`). That is correct and accepted; it is a
-  full 2027 cycle, cheap before kickoff.
+  full 2027 cycle, cheap before kickoff. *Amended — transport:* from the
+  service endpoint the chain is a **separate HTTP request**,
+  `GET /v3/data/reset_curr_year`, sent from a daemon thread after the
+  pipeline lock is released (inside the lock it would skip as busy). From
+  `reprocess_year` and the Cloud Run job it runs **inline**
+  (`chain="inline"`), because the job's process exits when the driver
+  returns and would kill an HTTP self-call in flight. *Amended — crash
+  safety:* the need for the chain is recorded in the manifest, not in
+  process memory. The manifest write that changes a `parquet/Y/team_years`
+  digest (the trailing publish, or window close's Parquet write) also sets
+  `chain_pending: true`; the full current-year publish (`publish_curr_year`,
+  which `reset_curr_year` and the inline chain run) clears it in its own
+  manifest write. A trailing cycle or window close chains whenever
+  `chain_pending` is set after its work, and the gate schedules
+  `GET /v3/data/reset_curr_year` itself whenever `chain_pending` is set, the
+  pipeline lock is free and no trailing action was scheduled. So a process
+  that dies between the publish and the chain is caught up on the next gate
+  tick.
+
+*Amended — pipeline lock:* the gate skips both probes while the pipeline
+lock is held in its process (a trailing cycle, window close, the sweep or a
+full current-year cycle is mid-publish) and answers
+`{"status": "skipped", "reason": "pipeline-busy", "trailing": null,
+"chain": false}`. The current-year endpoints (`reset_curr_year`,
+`update_curr_year`, `update_curr_year_debug`, `refresh_teams`) answer
+`{"status": "busy"}` when they find the lock held, never `success`.
 
 The daily sweep skips the trailing year while the window is open
 (`normalize_cursor`), so nothing else writes its hist blobs.
 
 ### 5.3 Frontend
 
-One helper, `isLiveYear(year, manifest)` in `frontend/src/api/storage.tsx`,
-true for `CURR_YEAR` and for `manifest.trailing_year`. It replaces the scattered
+One helper in `frontend/src/api/storage.tsx`, true for `CURR_YEAR` and for
+`manifest.trailing_year`. *Amended:* it is async, `isLiveYear(year):
+Promise<boolean>`, and reads the manifest itself through the module's cached
+`getManifest()` (60 s TTL), so callers write `const live = await
+isLiveYear(year)` and never pass a manifest. It replaces the scattered
 `year === CURR_YEAR` tests that decide live behaviour:
 
 - the event-page ping (`[event_id].tsx:49`), keeping the event date window;
@@ -181,8 +219,11 @@ manifest. No date logic in the frontend.
 ## 6. Trailing publish
 
 The site-blob renderers are split out of `write_hist_blobs` into render-only
-functions (no upload), with inputs sorted so the bytes are a function of
-content, not dict order (`storage.py:449-452`). A trailing publish renders the
+functions (no upload), `render_site_blobs`. *Amended:* inputs keep the
+pipeline's natural order and are **not** sorted. Renderers that need an order
+sort internally, and the rest are order-preserving, so the bytes already match
+the existing `hist/2` objects and an unchanged year advances no year epoch;
+sorting would have changed every year's bytes. A trailing publish renders the
 trailing year's site blobs and publishes them through `plan_uploads` as
 versioned `v2/{path}.{hash}` objects. Unchanged paths upload nothing.
 
@@ -204,13 +245,29 @@ trailing window is closed and the manifest still holds any year key of the
 trailing year or `trailing_year` is set. If a run dies, the next tick runs it
 again.
 
-1. A final **full** trailing cycle (fresh TBA, no etag trust), still with
-   live-year semantics so in-progress statuses are computed the same way.
+1. A final **full** cycle (fresh TBA, no etag trust). *Amended:* it runs with
+   **past-year** semantics, not live-year semantics. After close the year is
+   an ordinary past year; computing it the way the sweep will later compute
+   it avoids a spurious year-epoch advance on the next sweep visit. The two
+   semantics differ: an event that never posted a match becomes Invalid
+   (dropped from `events/Y`, no team events), and an Ongoing event with no
+   elims becomes Completed. Both are upstream past-year behaviour.
 2. A **year-epoch advance** for the trailing year (§8): write all its site blobs
    under the next year epoch.
 3. One manifest write (with the manifest precondition) that records the new
    year epoch, removes every year key of the trailing year except its Parquet
-   keys, and stamps `trailing_year: null`.
+   keys, and stamps `trailing_year: null`. *Amended:* steps 2–3 are the
+   ordinary past-year path. `publish_past_year` records the year epoch and
+   removes the non-Parquet year keys in one manifest write; a second write
+   then stamps `trailing_year: null`. Each write is idempotent, so a crash
+   between them is completed by the next run (close stays needed while
+   `trailing_year` is set).
+4. *Amended:* if the trailing year's `parquet/Y/team_years` digest changed,
+   window close chains the current-year re-render exactly as a trailing cycle
+   does (§5.2): a separate `GET /v3/data/reset_curr_year` from the service,
+   inline (`chain="inline"`) from a job. The Parquet write of step 2 sets
+   `chain_pending` when the digest changed, and close chains whenever
+   `chain_pending` is set after its marker write.
 
 Work size is a full single-year cycle plus ~4k uploads — the same order as a
 daily-sweep reprocess, which already runs in-request on the service today
@@ -247,7 +304,8 @@ holds years advanced past it.
 - **Standing rule for past years.** Every past-year reprocess — the daily sweep,
   `make reprocess-year`, window close — compares the rendered site blobs with
   the stored objects of the year's current epoch (md5 of `compress` output,
-  which is deterministic once inputs are sorted; looked up per candidate path,
+  which is deterministic for the pipeline's input order — *Amended:* no
+  sorting, §6; looked up per candidate path,
   not by a prefix listing, since `team/` spans every year). On any difference
   it does a year-epoch advance; otherwise it writes nothing. This replaces
   `write_hist_blobs`'s "skip existing" gap-fill for years that already have
@@ -291,6 +349,76 @@ read-modify-write it. Today there is no lock (DATA-REFRESH.md §6). So:
   existing endpoints and is not changed here.
 - Module `backend/src/data/trailing.py`: the trailing-window rule and
   `is_live_year`.
+
+*Amended — grammars added in the build:*
+
+- **Manifest field `chain_pending`**: boolean, default `false`. Set `true` in
+  the manifest write that changes a past or trailing year's
+  `parquet/Y/team_years` digest (the trailing publish; `write_parquet`,
+  which window close and every past-year reprocess use); set `false` by the
+  full current-year publish. While `true` the gate schedules
+  `GET /v3/data/reset_curr_year` (§5.2).
+
+- **Gate response field `trailing`.** `GET /v3/site/update_curr_year` adds
+  `"trailing": "full" | "partial" | "close" | null` to every response, beside
+  the unchanged current-year `status` (`skipped`, `backgrounded`, or
+  `skipped` with `reason: "snapshot-unreadable"`), plus `"chain": bool`
+  (whether the gate scheduled `reset_curr_year` for `chain_pending`). While
+  the pipeline lock is held the gate probes nothing and answers
+  `{"status": "skipped", "reason": "pipeline-busy", "trailing": null,
+  "chain": false}`. If the current-year probe raises, the gate still
+  evaluates the trailing action and answers HTTP 500
+  `{"status": "error", "error": "<type>: <message>", "trailing", "chain"}`
+  with the trailing self-call attached. From
+  `trailing_gate_action()`: `"close"` when `close_would_act` holds; `null`
+  when the trailing window is closed otherwise; `"full"` (bootstrap) when the
+  manifest's `trailing_year` is not the trailing year or the trailing
+  snapshot is unreadable; `"partial"` when `check_year_partial` sees new TBA
+  data; else `null`. A probe failure logs
+  `TRAILING GATE: probe failed (<type>: <message>); no trailing action` and
+  yields `null`. `"full"`/`"partial"` schedule
+  `update_trailing_year?full=1|0`, `"close"` schedules `close_trailing_year`.
+- **`close_would_act(manifest, year)`** (`src/data/main.py`): true when the
+  trailing window is closed and `close_needed` holds, i.e. the manifest sets
+  `trailing_year` or holds any non-Parquet year key of `year`. The gate and
+  `close_trailing_year` share it.
+- **Endpoint responses.** `update_trailing_year`:
+  `{"status": "success", "year", "full", "chain"}`,
+  `{"status": "skipped", "reason": "window-closed" | "gcs-disabled", "year"}`,
+  or `{"status": "busy"}`. `close_trailing_year`:
+  `{"status": "closed", "year", "chain"}`,
+  `{"status": "not_needed", "year"[, "reason": "gcs-disabled"]}`, or
+  `{"status": "busy"}`. `chain` is the manifest's `chain_pending` after the
+  work (the trailing year's `parquet/Y/team_years` digest changed now, or an
+  earlier chain never published). `reset_curr_year`, `update_curr_year`,
+  `update_curr_year_debug` and `refresh_teams` answer `{"status": "busy"}`
+  when they find the pipeline lock held; `update_curr_year()` returns the
+  sentinel `"busy"` (`data_main.BUSY`) then, else `None`.
+- **`publish_past_year(year, rendered)` outcomes** (`src/google/year_epoch.py`):
+  `"unchanged"` (every path matches under the year epoch `e`; nothing
+  uploaded), `"gap_filled"` (no path exists under `e`; all uploaded under `e`),
+  `"advanced"` (some path missing or different; all uploaded under `e + 1`,
+  then `hist_epochs[str(year)] = e + 1`). `e` is never below the code's
+  `HIST_EPOCH`. Raises `ValueError("live year")` for a live year.
+- **`trailing/status.json`** (bucket object, `Cache-Control: no-store`,
+  best-effort, read by `/info` as `TRAILING_STATUS`):
+  `{"year": int, "state": "running" | "ok" | "error", "full": bool,
+  "started": ISO-8601 UTC, "finished": ISO-8601 UTC | null,
+  "error": "<type>: <message>" | null}`. Written at the start and end of
+  every trailing cycle and of every window close that acts.
+- **`/info` fields:** `TRAILING_YEAR`, `TRAILING_WINDOW_OPEN`,
+  `TRAILING_STATUS`, `HIST_EPOCHS` (`null` when the manifest is unreadable),
+  `HIST_EPOCH_NEXT_MIN` (`max(HIST_EPOCH, max(hist_epochs)) + 1`, the
+  smallest global `HIST_EPOCH` a future bump must use; `null` when the
+  manifest is unreadable),
+  `MANIFEST_CONFLICTS` (`update_manifest` calls that exhausted their retries).
+- **Completion log lines** (stdout):
+  `TRAILING {year} CYCLE COMPLETE full={0|1} secs={n}`,
+  `TRAILING {year} CLOSE {not_needed|closed|error} secs={n}`,
+  `YEAR EPOCH {year} {unchanged|gap_filled|advanced} epoch={e}`, and
+  `PIPELINE BUSY: skipped <name>` when a pipeline finds the pipeline lock
+  held (`<name>` is `update_curr_year`, `refresh_teams`, `revalidate_tba`,
+  `update_trailing_year` or `close_trailing_year`).
 
 ## 11. Operator surface and docs
 

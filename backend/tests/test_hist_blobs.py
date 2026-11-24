@@ -1,20 +1,25 @@
 """DB retirement Phase 3 (design 2026-07-20 §2): db-less historical tooling.
 
-- write_hist_blobs renders one historical year's hist/{epoch}/ site blobs
-  from in-memory pipeline objects, byte-identical to what the retired
-  backfill_blobs.py script rendered from DB rows for the same objects:
-  team_years/{year}, events/{year}, event/{key}, team/{num}/{year}.
-- upload semantics unchanged: hist blobs are immutable within a HIST_EPOCH
-  (existing objects skipped), and team_years without a team row are skipped.
-- process_year's historical branch emits Parquet AND hist blobs db-less.
+- render_site_blobs renders one historical year's site blobs from in-memory
+  pipeline objects, byte-identical to what the retired backfill_blobs.py
+  script rendered from DB rows for the same objects: team_years/{year},
+  events/{year}, event/{key}, team/{num}/{year}. Render only: uploading is
+  year_epoch.publish_past_year's job (tests/test_year_epoch.py). team_years
+  without a team row are skipped.
+- process_year's past-year branch emits Parquet (write_parquet) and then
+  publishes render_site_blobs' output through year_epoch.publish_past_year
+  (per-year hist epochs), db-less.
 - process_year seeds prior-year team_years through the backend read
   (DuckDB-over-Parquet db-less) when all_team_years is None.
 - reprocess_year needs no DB: process_year + chained full current-year
   re-render (update_curr_year(partial=False) + refresh_teams).
 """
 
+import hashlib
+import json
 import zlib
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List
 
 import orjson
@@ -31,27 +36,6 @@ from src.site.team_year import _read_team_years
 from src.types.enums import CompLevel, EventStatus, MatchStatus, MatchWinner
 
 YEAR = 2025
-
-
-class FakeBlob:
-    def __init__(self, bucket: "FakeBucket", name: str):
-        self.bucket = bucket
-        self.name = name
-        self.cache_control = None
-
-    def exists(self) -> bool:
-        return self.name in self.bucket.objects
-
-    def upload_from_string(self, data: bytes, content_type: str = "") -> None:
-        self.bucket.objects[self.name] = data
-
-
-class FakeBucket:
-    def __init__(self):
-        self.objects: Dict[str, bytes] = {}
-
-    def blob(self, name: str) -> FakeBlob:
-        return FakeBlob(self, name)
 
 
 def make_match(key, event, red, blue, time):
@@ -130,7 +114,7 @@ def compress(data: Any) -> bytes:
 
 def expected_backfill_render(objs, teams) -> Dict[str, bytes]:
     """What backfill_blobs.backfill_year rendered + where it wrote it, for
-    these objects: the parity oracle for write_hist_blobs."""
+    these objects: the parity oracle for render_site_blobs."""
     year_obj = objs[0]
     team_years = list(objs[1].values())
     events = list(objs[2].values())
@@ -184,54 +168,48 @@ def expected_backfill_render(objs, teams) -> Dict[str, bytes]:
     return out
 
 
-# ------------------- write_hist_blobs (backfill_blobs parity) -----------------
+# ------------------ render_site_blobs (backfill_blobs parity) -----------------
+
+DIGESTS = Path(__file__).parent / "data" / "hist_render_digests.json"
 
 
-def test_write_hist_blobs_matches_backfill_blobs_rendering(monkeypatch):
+def test_render_site_blobs_matches_backfill_blobs_rendering():
     objs, teams = make_objs()
-    bucket = FakeBucket()
-    monkeypatch.setattr(storage, "_bucket", lambda: bucket)
 
-    written = storage.write_hist_blobs(YEAR, objs, teams)
+    rendered = storage.render_site_blobs(YEAR, objs, teams)
 
-    expected = expected_backfill_render(objs, teams)
-    assert set(bucket.objects) == set(expected)
-    for name, data in expected.items():
-        assert bucket.objects[name] == data, f"payload mismatch for {name}"
+    prefix = historical_key(HIST_EPOCH, "")
+    expected = {
+        name[len(prefix) :]: data
+        for name, data in expected_backfill_render(objs, teams).items()
+    }
+    assert set(rendered) == set(expected)
+    for path, data in expected.items():
+        assert rendered[path] == data, f"payload mismatch for {path}"
     # 999 has a TeamYear but no team row: skipped, exactly as backfill_blobs.
-    assert historical_key(HIST_EPOCH, f"team/999/{YEAR}") not in bucket.objects
-    assert written == len(expected)
+    assert f"team/999/{YEAR}" not in rendered
 
 
-def test_write_hist_blobs_skips_existing_objects(monkeypatch):
+def test_render_matches_previous_hist_bytes():
+    """Bytes per path equal what the retired write_hist_blobs uploaded for
+    this fixture (sha256 digests captured from it before it was deleted), so
+    the first past-year visit after the switch finds every page unchanged and
+    advances no year epoch."""
     objs, teams = make_objs()
-    bucket = FakeBucket()
-    existing = historical_key(HIST_EPOCH, f"team_years/{YEAR}")
-    bucket.objects[existing] = b"already-there"
-    monkeypatch.setattr(storage, "_bucket", lambda: bucket)
+    expected = json.loads(DIGESTS.read_text())
 
-    written = storage.write_hist_blobs(YEAR, objs, teams)
+    rendered = storage.render_site_blobs(YEAR, objs, teams)
 
-    # Immutable within an epoch: the existing blob is untouched.
-    assert bucket.objects[existing] == b"already-there"
-    assert written == len(expected_backfill_render(objs, teams)) - 1
+    assert {p: hashlib.sha256(d).hexdigest() for p, d in rendered.items()} == expected
 
 
-def test_write_hist_blobs_sets_immutable_cache_control(monkeypatch):
+def test_render_site_blobs_touches_no_bucket(monkeypatch):
+    def no_bucket():
+        raise AssertionError("render_site_blobs must not touch GCS")
+
+    monkeypatch.setattr(storage, "_bucket", no_bucket)
     objs, teams = make_objs()
-    bucket = FakeBucket()
-    seen: List[Any] = []
-    real_blob = FakeBucket.blob
-
-    def spy_blob(self, name):
-        b = real_blob(self, name)
-        seen.append(b)
-        return b
-
-    monkeypatch.setattr(FakeBucket, "blob", spy_blob)
-    monkeypatch.setattr(storage, "_bucket", lambda: bucket)
-    storage.write_hist_blobs(YEAR, objs, teams)
-    assert seen and all(b.cache_control == storage.IMMUTABLE_CACHE for b in seen)
+    assert storage.render_site_blobs(YEAR, objs, teams)
 
 
 # ---------------- process_year historical branch (db-less) --------------------
@@ -265,28 +243,69 @@ def test_dbless_historical_process_year_emits_parquet_and_hist_blobs(monkeypatch
     monkeypatch.setattr(data_main, "DISABLE_GCS", False)
     _stub_stages(monkeypatch, ingested_ty=TeamYear(team=254, year=YEAR, count=3))
 
+    order: List[str] = []
     parquet_calls: List[Any] = []
-    hist_calls: List[Any] = []
-    monkeypatch.setattr(
-        data_main,
-        "write_parquet",
-        lambda year, objs, teams: parquet_calls.append((year, objs, teams)),
-    )
-    monkeypatch.setattr(
-        data_main,
-        "write_hist_blobs",
-        lambda year, objs, teams: hist_calls.append((year, objs, teams)),
-    )
+    render_calls: List[Any] = []
+    publish_calls: List[Any] = []
+    rendered = {f"events/{YEAR}": b"x"}
+
+    def fake_write_parquet(year, objs, teams):
+        order.append("parquet")
+        parquet_calls.append((year, objs, teams))
+
+    def fake_render(year, objs, teams):
+        order.append("render")
+        render_calls.append((year, objs, teams))
+        return rendered
+
+    def fake_publish(year, blobs):
+        order.append("publish")
+        publish_calls.append((year, blobs))
+        return "unchanged"
+
+    monkeypatch.setattr(data_main, "write_parquet", fake_write_parquet)
+    monkeypatch.setattr(data_main, "render_site_blobs", fake_render)
+    monkeypatch.setattr(data_main, "publish_past_year", fake_publish)
     teams = [Team(team=254, name="The Cheesy Poofs", rookie_year=1999)]
     teams, objs = data_main.process_year(
         YEAR, False, False, True, teams, create_objs(YEAR), {}
     )
 
-    assert len(parquet_calls) == 1 and len(hist_calls) == 1
-    assert parquet_calls[0][0] == YEAR and hist_calls[0][0] == YEAR
+    assert order == ["parquet", "render", "publish"]
+    assert parquet_calls[0][0] == YEAR and render_calls[0][0] == YEAR
     # Both emissions see the same post-EPA pipeline objects and teams.
-    assert hist_calls[0][1] is parquet_calls[0][1] is objs
-    assert hist_calls[0][2] is parquet_calls[0][2] is teams
+    assert render_calls[0][1] is parquet_calls[0][1] is objs
+    assert render_calls[0][2] is parquet_calls[0][2] is teams
+    assert publish_calls == [(YEAR, rendered)]
+
+
+def test_process_year_publishes_no_hist_blobs_for_live_trailing_year(
+    monkeypatch, trailing_open
+):
+    """While the trailing window is open the trailing year is live: the
+    past-year branch is never reached."""
+    year = data_main.trailing.trailing_year()
+    monkeypatch.setattr(data_main, "DISABLE_GCS", False)
+    _stub_stages(monkeypatch)
+    calls: List[str] = []
+    monkeypatch.setattr(data_main, "write_parquet", lambda *a: calls.append("parquet"))
+    monkeypatch.setattr(
+        data_main, "publish_past_year", lambda *a: calls.append("publish")
+    )
+    # The live branch publishes through the manifest instead (tested in
+    # tests/test_trailing_cycle.py).
+    live: List[str] = []
+    monkeypatch.setattr(
+        data_main, "trailing_publish", lambda *a: live.append("trailing") or False
+    )
+    monkeypatch.setattr(data_main, "write_snapshot", lambda *a: live.append("snapshot"))
+    assert data_main.trailing.is_live_year(year)
+
+    teams = [Team(team=254, name="The Cheesy Poofs", rookie_year=1999)]
+    data_main.process_year(year, False, False, True, teams, create_objs(year), {})
+
+    assert calls == []
+    assert live == ["trailing", "snapshot"]
 
 
 def test_dbless_prior_year_seeding_reads_backend(monkeypatch):

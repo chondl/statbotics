@@ -2,7 +2,7 @@ import { CURR_YEAR } from "../constants";
 import { APITeam, APITeamEvent } from "../types/api";
 import { TeamYearData, TeamYearRedirect } from "../types/data";
 import { getEvent } from "./event";
-import query, { fetchBucketData, version } from "./storage";
+import query, { fetchBucketData, isLiveYear, version } from "./storage";
 import { getYearTeamYears } from "./teams";
 
 export async function getTeam(team: number): Promise<{ team: APITeam; team_years: any[] }> {
@@ -74,7 +74,8 @@ export async function getTeamYear(
       team_matches: teamMatches,
     };
   } catch (e) {
-    return query(storageKey, urlSuffix, true, 0, year === CURR_YEAR ? 60 : 60 * 60); // 1 minute / 1 hour
+    const live = await isLiveYear(year);
+    return query(storageKey, urlSuffix, true, 0, live ? 60 : 60 * 60); // 1 minute / 1 hour
   }
 }
 

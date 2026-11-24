@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import src.data.main as data_main
 import src.tba.main as tba_main
 from src.constants import CURR_YEAR
+from src.data import trailing
+from src.data.pipeline_lock import try_hold
 from src.tba import cache as tba_cache
 from src.tba.utils import dump_cache
 
@@ -35,11 +37,15 @@ SKIP_YEARS = {2021}  # season cancelled; reset_all_years skips it too (§4)
 
 def normalize_cursor(year: Optional[int]) -> int:
     """Clamp a stored cursor to a sweepable historical year: missing or
-    out-of-range restarts at the oldest year; skip years advance."""
+    out-of-range restarts at the oldest year; skip years and live years (the
+    trailing year while its window is open: nothing but trailing cycles may
+    write it) advance."""
     if year is None or year < SWEEP_START_YEAR or year >= CURR_YEAR:
         year = SWEEP_START_YEAR
-    while year in SKIP_YEARS:
+    while year in SKIP_YEARS or trailing.is_live_year(year):
         year += 1
+        if year >= CURR_YEAR:
+            year = SWEEP_START_YEAR
     return year
 
 
@@ -50,7 +56,16 @@ def next_sweep_year(year: int) -> int:
 
 
 def revalidate_tba() -> Dict[str, Any]:
-    """Sweep one historical year; reprocess it if anything changed."""
+    """Sweep one historical year; reprocess it if anything changed. Skips
+    (cursor untouched) while another pipeline holds PIPELINE_LOCK."""
+    with try_hold() as held:
+        if not held:
+            print("PIPELINE BUSY: skipped revalidate_tba")
+            return {"status": "busy"}
+        return _revalidate_tba_held()
+
+
+def _revalidate_tba_held() -> Dict[str, Any]:
     tba_cache.hydrate()  # global archive: the cursor (+ teams etag state)
     year = normalize_cursor(tba_cache.sweep_cursor())
     tba_cache.hydrate(year)

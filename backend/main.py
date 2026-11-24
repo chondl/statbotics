@@ -1,5 +1,5 @@
 import platform
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Optional
 
 from dotenv import load_dotenv  # type: ignore
 
@@ -13,7 +13,7 @@ load_dotenv()
 # flake8: noqa E402
 from src.api.router import router as api_router
 from src.auth import generate_api_key, get_api_key
-from src.constants import PROD
+from src.constants import HIST_EPOCH, PROD
 from src.data.router import (
     data_router as data_data_router,
     site_router as data_site_router,
@@ -70,11 +70,46 @@ async def read_root():
     return {"Hello": "World"}
 
 
+def hist_epoch_next_min(hist_epochs: Optional[Dict[str, int]]) -> Optional[int]:
+    """The smallest global HIST_EPOCH a future bump must use: above every
+    year epoch (the year epoch is a max, so a year at or above the new
+    HIST_EPOCH keeps serving its older render) and above the deployed
+    HIST_EPOCH. None when the manifest is unreadable."""
+    if hist_epochs is None:
+        return None
+    return max([HIST_EPOCH, *hist_epochs.values()]) + 1
+
+
+def _read_hist_epochs() -> Optional[Dict[str, int]]:
+    from src.google import storage as gcs_storage
+
+    try:
+        manifest = gcs_storage.read_manifest()
+        return dict(manifest.hist_epochs) if manifest is not None else {}
+    except Exception:
+        return None
+
+
 @router.get("/info")
 def get_info():
     from src.data import main as data_main
+    from src.data import trailing
+    from src.google import storage as gcs_storage
+    from src.google import trailing_publish
+
+    hist_epochs = _read_hist_epochs()
+    try:
+        trailing_status = trailing_publish.read_trailing_status()
+    except Exception:
+        trailing_status = None
 
     return {
+        "TRAILING_YEAR": trailing.trailing_year(),
+        "TRAILING_WINDOW_OPEN": trailing.trailing_window_open(),
+        "TRAILING_STATUS": trailing_status,
+        "HIST_EPOCHS": hist_epochs,
+        "HIST_EPOCH_NEXT_MIN": hist_epoch_next_min(hist_epochs),
+        "MANIFEST_CONFLICTS": gcs_storage.manifest_conflicts,
         "PROD": PROD,
         "PYTHON_VERSION": platform.python_version(),
         "SEED_INCOMPLETE": data_main.seed_incomplete,

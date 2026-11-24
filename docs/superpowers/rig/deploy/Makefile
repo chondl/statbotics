@@ -42,7 +42,8 @@
 # Common flows:
 #   make ship                      # THE deploy path: build both images + deploy both services
 #   make reprocess-curr-year       # re-ingest current year (picks up new offseason events)
-#   make reprocess-year YEAR=2025  # re-ingest one historical year (process+parquet+hist blobs)
+#   make reprocess-year YEAR=2025  # re-ingest one past year (process+parquet+site blobs under its year epoch)
+#   make verify-trailing YEAR=2026 EVENT=2026mmr  # trailing state + one event's page vs API (read-only)
 #   make verify-event EVENT=2026iri
 #   make smoke
 
@@ -210,16 +211,17 @@ refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync +
 # --------------------------- DATA: HISTORICAL YEAR ---------------------------
 # Targeted single-year reprocess as a Cloud Run JOB (jobs allow long timeouts;
 # the service HTTP path caps at 3600s). process_year(partial=False) re-ingests
-# that year fresh (new offseason events), regenerates its Parquet, and emits its
-# hist/ site blobs from pipeline objects (db-less capable). Prefer this over a
+# that year fresh (new offseason events), regenerates its Parquet, and
+# publishes its site blobs under its year epoch (db-less). Prefer this over a
 # full `reset_all_years` when only one year changed.
 #
 # The driver is src.data.main.reprocess_year — the SAME function the daily TBA
 # sweep runs — so job and sweep can never diverge. It re-ingests the year
-# (process_year partial=False), republishes its Parquet, emits its hist/ site
-# blobs from the pipeline objects (write-once per HIST_EPOCH; bump HIST_EPOCH
-# in src/constants.py to force a re-export), rewrites the year's DB rows in DB
-# mode (write_objs clean=True; skipped entirely db-less), and ends by running
+# (process_year partial=False), republishes its Parquet, publishes its site
+# blobs through year_epoch.publish_past_year (unchanged pages write nothing;
+# any changed page moves the whole year to a new year epoch hist/{e+1}/ and
+# records it in the manifest's hist_epochs, so no HIST_EPOCH bump is needed),
+# and ends by running
 # reset_curr_year's body (update_curr_year(partial=False) + refresh_teams) IN
 # the job: team/{num} site blobs embed each team's full-history team_years,
 # and the team-blob change gate (storage.py _team_render_set) skips them on
@@ -231,16 +233,23 @@ refresh-teams: ## Manually run the daily team-fields refresh (TBA team re-sync +
 # edge is fine" caveat does not apply — `jobs execute --wait` returns only
 # when everything (chain included) finished.
 #
+# YEAR = the trailing year (CURR_YEAR-1) while the trailing window is open
+# (until Dec 28 00:00 America/Los_Angeles) is a live year, not a past year:
+# reprocess_year then runs one full trailing cycle (trailing publish through
+# the manifest, no hist blobs), chaining the current-year re-render inline
+# only when the trailing year's team_years Parquet changed. The gate
+# already refreshes the trailing year hourly, so this is rarely needed.
+#
 # The retired backfill_parquet.py / backfill_blobs.py operator scripts are
 # superseded by this driver + reset_all_years (see
 # ../../deliverables/historical-backfill.md).
 JOB_NAME ?= statbotics-reprocess-$(YEAR)
-REPROCESS_DRIVER = import src.db.models, src.data.main as dm; dm.reprocess_year($(YEAR)); print('REPROCESS_$(YEAR)_COMPLETE (parquet + hist blobs + chained curr-year re-render)')
+REPROCESS_DRIVER = import src.db.models, src.data.main as dm; dm.reprocess_year($(YEAR)); print('REPROCESS_$(YEAR)_COMPLETE (parquet + site blobs + chained curr-year re-render)')
 
 .PHONY: reprocess-year
 reprocess-year: require-YEAR pause-cron ## Reprocess ONE historical year end-to-end, then chain a full current-year re-render. Usage: make reprocess-year YEAR=2025 [REFRESH_TBA=1 to bypass the TBA cache manifest]
 	@set -e; \
-	echo "Reprocessing $(YEAR) (process + parquet + hist blobs) as a Cloud Run job..."; \
+	echo "Reprocessing $(YEAR) (process + parquet + site blobs) as a Cloud Run job..."; \
 	$(GC) run jobs delete $(JOB_NAME) --region $(REGION) --quiet 2>/dev/null || true; \
 	$(GC) run jobs create $(JOB_NAME) \
 	  --image $(IMAGE_API) --region $(REGION) \
@@ -300,6 +309,20 @@ logs: ## Tail recent backend REQUEST logs (no pipeline stdout; see pipeline-logs
 pipeline-logs: ## Pipeline stdout (e.g. '2027 Write Snapshot', WARNING lines) from the last MIN (default 20) minutes
 	$(GC) logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="$(API_SERVICE)" AND logName:"stdout"' \
 	  --freshness=$${MIN:-20}m --limit $${N:-200} --format='value(timestamp,textPayload)' | sort
+
+# Trailing-year refresh (DATA-REFRESH.md §3, §5). verify-trailing is
+# read-only: the manifest and site blobs from the blob domain, the event and
+# its matches from the API; it exits non-zero when the event page and the API
+# disagree, the event is missing from events/YEAR, or an EXPECT_* differs.
+.PHONY: verify-trailing pipeline-errors manifest-backup
+verify-trailing: ## Trailing state + one event's page vs API. Usage: make verify-trailing YEAR=2026 EVENT=2026mmr [EXPECT_TEAMS=32 EXPECT_MATCHES=40]
+	python3 $(MAIN_DIR)/docs/superpowers/rig/verify/trailing.py --bucket-url https://$(BLOB_DOMAIN) --api-url $(API_URL) --year $${YEAR:-2026} --event $${EVENT:-2026mmr} $(if $(EXPECT_TEAMS),--expect-teams $(EXPECT_TEAMS)) $(if $(EXPECT_MATCHES),--expect-matches $(EXPECT_MATCHES))
+
+pipeline-errors: ## Backend stderr Tracebacks and gunicorn WORKER TIMEOUTs from the last MIN (default 20) minutes
+	$(GC) logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="$(API_SERVICE)" AND logName:"stderr" AND (Traceback OR "WORKER TIMEOUT")' --freshness=$${MIN:-20}m --limit $${N:-200} --format='value(timestamp,textPayload)' | sort
+
+manifest-backup: ## Copy manifest.json to backups/manifest.<UTC timestamp>.json and print the source generation (run before a risky deploy)
+	@ts=$$(date -u +%Y%m%dT%H%M%SZ); gen=$$($(GC) storage objects describe gs://$(BUCKET_NAME)/manifest.json --format='value(generation)') && $(GC) storage cp "gs://$(BUCKET_NAME)/manifest.json#$$gen" gs://$(BUCKET_NAME)/backups/manifest.$$ts.json && echo "manifest.json generation $$gen -> gs://$(BUCKET_NAME)/backups/manifest.$$ts.json"
 
 info: ## Show the deployed backend /info
 	@curl -s --max-time 15 "$(API_URL)/info" | python3 -m json.tool

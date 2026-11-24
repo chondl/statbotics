@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import src.google.storage as storage
 from src.db.models import ETag, Event, Match, Team, TeamEvent, TeamYear, Year
-from src.google.publish import UploadPlan
+from src.google.publish import Manifest, UploadPlan
 from src.google.storage import _team_render_set
 from src.types.enums import CompLevel, EventStatus, EventType, MatchStatus, MatchWinner
 
@@ -165,6 +165,7 @@ class Recorder:
     def __init__(self):
         self.rendered = None
         self.plan = None
+        self.manifest = None
         self.hist_ty_calls = 0
 
 
@@ -183,12 +184,15 @@ def run_write_objs(monkeypatch, objs, orig_objs, teams, orig_teams, prev_manifes
 
     real_plan_uploads = storage.plan_uploads
 
-    def spy_plan_uploads(rendered, prev, cycle, hist_epoch=None):
+    def spy_plan_uploads(rendered, prev, cycle):
         rec.rendered = dict(rendered)
-        return real_plan_uploads(rendered, prev, cycle, hist_epoch=hist_epoch)
+        return real_plan_uploads(rendered, prev, cycle)
 
-    def fake_publish(plan: UploadPlan):
+    def fake_publish(plan: UploadPlan, mutate=None):
+        # What update_manifest would commit over the previous manifest.
         rec.plan = plan
+        rec.manifest = deepcopy(prev_manifest) if prev_manifest else Manifest()
+        plan.apply(rec.manifest)
 
     monkeypatch.setattr(storage, "get_team_years_db", fake_get_team_years_db)
     monkeypatch.setattr(storage, "get_events_db", lambda: list(objs[2].values()))
@@ -222,7 +226,7 @@ def test_quiet_partial_cycle_renders_zero_team_blobs(monkeypatch):
     objs, teams = make_cycle()
     # Seed the previous manifest from a full cycle over the same data.
     full = run_write_objs(monkeypatch, objs, None, teams, None, None)
-    prev = full.plan.manifest
+    prev = full.manifest
 
     rec = run_write_objs(
         monkeypatch, objs, deepcopy(objs), teams, deepcopy(teams), prev
@@ -234,13 +238,14 @@ def test_quiet_partial_cycle_renders_zero_team_blobs(monkeypatch):
     # Nothing changed, so nothing uploads and the blob set is unchanged.
     assert rec.plan.uploads == {}
     assert rec.plan.legacy_uploads == {}
-    assert rec.plan.manifest.blobs == prev.blobs
+    assert rec.plan.blob_updates == {}
+    assert rec.manifest.blobs == prev.blobs
 
 
 def test_partial_cycle_with_changed_team_year_renders_only_that_team(monkeypatch):
     objs, teams = make_cycle()
     full = run_write_objs(monkeypatch, objs, None, teams, None, None)
-    prev = full.plan.manifest
+    prev = full.manifest
 
     orig_objs = deepcopy(objs)
     # norm_epa is a field _read_team actually emits, so the re-rendered blob's
@@ -255,7 +260,7 @@ def test_partial_cycle_with_changed_team_year_renders_only_that_team(monkeypatch
 def test_partial_cycle_with_removed_team_year_rerenders_blob(monkeypatch):
     objs, teams = make_cycle()
     full = run_write_objs(monkeypatch, objs, None, teams, None, None)
-    prev = full.plan.manifest
+    prev = full.manifest
 
     orig_objs = deepcopy(objs)
     del objs[1][f"1678_{YEAR}"]
@@ -266,7 +271,7 @@ def test_partial_cycle_with_removed_team_year_rerenders_blob(monkeypatch):
 def test_partial_cycle_with_changed_team_row_renders_blob(monkeypatch):
     objs, teams = make_cycle()
     full = run_write_objs(monkeypatch, objs, None, teams, None, None)
-    prev = full.plan.manifest
+    prev = full.manifest
 
     orig_teams = deepcopy(teams)
     teams[1].name = "Citrus Circuits (renamed)"
@@ -283,7 +288,7 @@ def test_partial_snapshot_fallback_renders_all_team_blobs(monkeypatch):
     # gate (orig_objs, validly reconstructed from the DB) still applies.
     objs, teams = make_cycle()
     full = run_write_objs(monkeypatch, objs, None, teams, None, None)
-    prev = full.plan.manifest
+    prev = full.manifest
 
     rec = run_write_objs(monkeypatch, objs, deepcopy(objs), teams, None, prev)
     assert team_keys(rec.rendered) == {"team/254", "team/1678"}

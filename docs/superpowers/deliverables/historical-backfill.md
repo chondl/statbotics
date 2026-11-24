@@ -71,23 +71,34 @@ make resume-cron
   `--args "-c" "import src.db.models, src.data.main as dm; dm.reset_all_years()"`
   and a longer `--task-timeout`. A Cloudflare edge 524 does not stop the
   server-side run; poll `make logs | grep 'Write Storage'`.
-- Per year it prints `{year} Write Parquet` and `{year} Write Hist Blobs`;
-  the run ends with the current-year `Write Snapshot` / `Write Storage`.
-- **Manifest cadence:** each historical year does one manifest
-  read-modify-write. That is safe at the pipeline's minutes-per-year cadence,
-  but do not wrap rapid manual manifest writers in a tight loop — the
-  manifest carries `Cache-Control: max-age=60`.
+- Per year it prints `{year} Write Parquet`, then
+  `YEAR EPOCH {year} {unchanged|gap_filled|advanced} epoch={e}` and
+  `{year} Write Hist Blobs`; the run ends with the current-year
+  `Write Snapshot` / `Write Storage`. While the trailing window is open the
+  trailing year (`CURR_YEAR − 1`) is a live year and prints
+  `{year} Trailing Publish` instead (no hist blobs).
+- **Manifest cadence:** each past year does at most two manifest writes (its
+  Parquet, then its year epoch or entry cleanup when either changed). Every
+  write carries the manifest precondition and retries on a lost race, so a
+  concurrent writer is not erased; still, do not wrap rapid manual manifest
+  writers in a tight loop — the manifest carries `Cache-Control: max-age=60`.
 
-### `hist/` blob semantics (write-once per epoch)
+### `hist/` blob semantics (immutable; a change moves the year epoch)
 
-Hist blobs are immutable within a `HIST_EPOCH` (`src/constants.py`):
-`upload_historical` skips objects that already exist, so a rebuild over a
-populated bucket only fills gaps — it does **not** overwrite existing hist
-payloads. When historical rendering or data changes and the exported set must
-actually be replaced, **bump `HIST_EPOCH`**: the pipeline then writes the
-whole set fresh under `hist/{new_epoch}/…`, and the manifest's `hist_epoch`
-stamp (maintained by every current-year publish) repoints readers. Uploads
-are thread-pooled; a full-history export is ~150k objects.
+Hist blobs are immutable once readers resolve them. A past year resolves
+under its **year epoch**, `max(hist_epochs[year] ?? 0, hist_epoch)` from the
+manifest, where `hist_epoch` is stamped from `HIST_EPOCH`
+(`src/constants.py`). Each year goes through `year_epoch.publish_past_year`,
+which compares the rendered pages with the objects under that epoch:
+`unchanged` writes nothing; `gap_filled` (no objects yet, e.g. an empty
+bucket) writes them under the epoch; `advanced` (any page missing or
+different) writes the whole year under `e + 1` and only then records
+`hist_epochs[year] = e + 1`. So a rebuild over a populated bucket replaces
+exactly the years whose data changed, with no `HIST_EPOCH` bump. Bump
+`HIST_EPOCH` only for a renderer change across all years, and to at least
+`/info` `HIST_EPOCH_NEXT_MIN` (above `max(hist_epochs)`); the pipeline then
+gap-fills every year under `hist/{new_epoch}/…`. Uploads are thread-pooled; a
+full-history export is ~150k objects.
 
 ### Single-year rebuild
 
