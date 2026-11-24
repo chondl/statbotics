@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from src.constants import CURR_YEAR, DISABLE_GCS
+from src.data import trailing
 from src.data.avg import process_year as process_year_avg
 from src.data.backend import get_team_event_teams as get_team_event_teams_db
 from src.data.backend import get_team_years as get_team_years_db
@@ -21,8 +22,9 @@ from src.data.wins import winrate
 from src.db.models import Team, TeamYear
 from src.google.parquet import build_parquet_uploads, write_parquet
 from src.google.snapshot import read_snapshot, write_snapshot
-from src.google.storage import publish_team_artifacts, write_hist_blobs
+from src.google.storage import publish_team_artifacts, render_site_blobs
 from src.google.storage import write_objs as write_objs_storage
+from src.google.year_epoch import publish_past_year
 from src.tba import cache as tba_cache
 from src.tba.clean_data import clean_district
 
@@ -148,18 +150,20 @@ def process_year(
         write_snapshot(year_num, objs, teams)
         timer.print(str(year_num) + " Write Snapshot")
 
-    # Current-year parquet is folded into the site manifest above; historical years
-    # publish parquet on their own manifest write (independent of the DB, so db-less
-    # backfill still produces parquet). Historical hist/ site blobs are emitted from
-    # the same pipeline objects (DB retirement Phase 3, replacing the DB-reading
-    # backfill_blobs.py): write-once within a HIST_EPOCH, so already-exported blobs
-    # are skipped and a reset_all_years/reprocess_year only fills gaps — bump
-    # HIST_EPOCH to force a full re-export.
-    if not curr_year_gcs and not DISABLE_GCS:
+    # Current-year parquet is folded into the site manifest above; past years
+    # publish parquet on their own manifest write. A past year's hist/ site
+    # blobs are rendered from the same pipeline objects and published through
+    # its per-year hist epoch (year_epoch.publish_past_year): unchanged pages
+    # write nothing, a cold year fills gaps under the global epoch, and any
+    # changed page moves the whole year to a fresh epoch, so a reprocess can
+    # never leave a past-year page stale. A live year (the trailing year while
+    # its window is open) never reaches this branch: publish_past_year
+    # refuses it.
+    if not curr_year_gcs and not DISABLE_GCS and not trailing.is_live_year(year_num):
         write_parquet(year_num, objs, teams)
         timer.print(str(year_num) + " Write Parquet")
 
-        write_hist_blobs(year_num, objs, teams)
+        publish_past_year(year_num, render_site_blobs(year_num, objs, teams))
         timer.print(str(year_num) + " Write Hist Blobs")
 
     # Re-pack + upload only dirty TBA cache archives now that the year's
@@ -399,8 +403,9 @@ def reprocess_year(year_num: int) -> None:
       freshly revalidated pickles (zero further TBA traffic for validated
       paths), recomputes EPA with the prior-4-year team_years seeding read
       inside process_year (all_team_years=None — Parquet via DuckDB),
-      republishes the year's Parquet, and emits its hist/ site blobs from the
-      pipeline objects (write_hist_blobs; write-once per HIST_EPOCH).
+      republishes the year's Parquet, and publishes its hist/ site blobs
+      from the pipeline objects through the year's hist epoch
+      (year_epoch.publish_past_year: a changed page advances the year).
     - Chained full current-year re-render: team/{num} site blobs embed each
       team's full-history team_years and the team-blob change gate skips
       them on partial cycles, so a historical reprocess MUST chain a full

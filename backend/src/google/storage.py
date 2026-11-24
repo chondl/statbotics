@@ -22,7 +22,6 @@ from src.google.publish import (
     Manifest,
     UploadPlan,
     content_hash,
-    historical_key,
     plan_uploads,
     versioned_key,
 )
@@ -521,44 +520,27 @@ def gc_versioned_blobs(
     }
 
 
-def upload_historical(logical_path: str, data: Any, bucket: Any = None) -> bool:
-    bucket = bucket or _bucket()
-    blob = bucket.blob(historical_key(HIST_EPOCH, logical_path))
-    if blob.exists():
-        return False
-    blob.cache_control = IMMUTABLE_CACHE
-    blob.upload_from_string(compress(data), "application/octet-stream")
-    return True
+def render_site_blobs(
+    year: int, objs: objs_type, teams: List[Team]
+) -> Dict[str, bytes]:
+    """Render one past year's site blobs from in-memory pipeline objects:
+    logical path -> compressed payload. Render only, no GCS access;
+    year_epoch.publish_past_year decides what, if anything, to upload.
 
-
-def write_hist_blobs(year: int, objs: objs_type, teams: List[Team]) -> int:
-    """Render + upload one historical year's hist/{epoch}/ site blobs from
-    in-memory pipeline objects — the db-less replacement for the retired
-    backfill_blobs.py operator script (DB retirement Phase 3), rendering
-    exactly the object families it rendered, at the same paths:
+    The object families and paths are those the retired backfill_blobs.py
+    operator script rendered (DB retirement Phase 3):
 
         team_years/{year}    _read_team_years
         events/{year}        _read_events
         event/{key}          _read_event      (one per event)
         team/{num}/{year}    _read_team_year  (one per TeamYear with a
                                                known team row)
-
-    Upload semantics are upload_historical's, unchanged: hist blobs are
-    immutable within a HIST_EPOCH — objects that already exist are left
-    alone. To force a full re-export (rendering or data changed for
-    already-exported blobs), bump HIST_EPOCH in src/constants.py and rerun.
-    The manifest is never touched here: its hist_epoch stamp is maintained
-    by every manifest write (update_manifest stamps max(prev, HIST_EPOCH)),
-    and hist objects are resolved by path, not through manifest.blobs.
-
-    Uploads are independent single objects, so they run through a thread
-    pool (the sequential exists+upload pairs dominated backfill_blobs.py's
-    wall time; the bucket client is thread-safe, as _publish already relies
-    on)."""
-    # Input lists in the objs dicts' natural order, mirroring how
-    # backfill_blobs consumed its DB reads: renderers that need a specific
-    # order sort internally (_read_events/_read_event by time); the rest are
-    # order-preserving, so payload bytes are a pure function of these lists.
+    """
+    # Input lists in the objs dicts' natural order, never sorted here:
+    # renderers that need a specific order sort internally
+    # (_read_events/_read_event by time); the rest are order-preserving, so
+    # payload bytes are a pure function of these lists and match the bytes
+    # already published under hist/ (an unchanged year advances no epoch).
     year_obj = objs[0]
     team_years = list(objs[1].values())
     events = list(objs[2].values())
@@ -614,11 +596,4 @@ def write_hist_blobs(year: int, objs: objs_type, teams: List[Team]) -> int:
             )
         )
 
-    bucket = _bucket()
-    with ThreadPoolExecutor() as executor:
-        results = list(
-            executor.map(lambda p: upload_historical(p[0], p[1], bucket), payloads)
-        )
-    written = sum(1 for r in results if r)
-    print(f"hist blobs {year}: wrote {written}/{len(payloads)} (epoch {HIST_EPOCH})")
-    return written
+    return {path: compress(data) for path, data in payloads}
