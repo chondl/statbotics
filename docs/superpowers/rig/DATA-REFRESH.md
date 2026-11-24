@@ -87,10 +87,18 @@ flowchart TB
   gate --> ta{"trailing_gate_action"}
   ta -->|"full or partial"| uty["/v3/data/update_trailing_year"]
   ta -->|"close"| close["/v3/data/close_trailing_year"]
-  ta -->|"null"| idle["trailing: null"]
-  uty -.->|"team_years changed"| reset["/v3/data/reset_curr_year"]
-  close -.->|"team_years changed"| reset
+  ta -->|"null"| cp{"chain_pending?"}
+  cp -->|"no"| idle["trailing: null"]
+  cp -->|"yes"| reset["/v3/data/reset_curr_year"]
+  uty -.->|"chain_pending"| reset
+  close -.->|"chain_pending"| reset
 ```
+
+While the pipeline lock is held in the process (a trailing cycle, window
+close, the sweep or a full current-year cycle is mid-publish), the gate
+probes nothing and answers
+`{"status": "skipped", "reason": "pipeline-busy", "trailing": null, "chain": false}`;
+the next tick probes a settled baseline.
 
 The current-year branch is unchanged: on a TBA change it backgrounds
 `update_curr_year(partial=True, tba_partial=True)`, a full-season EPA replay
@@ -98,7 +106,12 @@ plus the GCS/Parquet publish. The response's `status` is `skipped`,
 `backgrounded`, or `skipped` with `reason: snapshot-unreadable`. The
 trailing branch adds a `trailing` field to every gate response — `"full"`,
 `"partial"`, `"close"` or `null` — and is described under
-[(C) The trailing year](#c-the-trailing-year--trailing-cycles).
+[(C) The trailing year](#c-the-trailing-year--trailing-cycles). Every
+response also carries `chain` (see
+[The chained current-year re-render](#the-chained-current-year-re-render)).
+If the current-year probe raises, the gate still schedules the trailing
+action and answers HTTP 500 with `status: "error"`, `error`, `trailing` and
+`chain`.
 
 ### (A) Hourly scheduler — the idle backstop
 
@@ -153,7 +166,7 @@ the heavy `process_year` cycle.
 After the current-year probe the gate always evaluates
 `trailing_gate_action()` (`router.py`), including when the current-year
 probe skipped. A failure there logs `TRAILING GATE: probe failed (…)` and
-yields `trailing: null`; the gate never 500s. The action:
+yields `trailing: null`; a trailing probe failure never 500s the gate. The action:
 
 | `trailing` | When | Background self-call |
 |---|---|---|
@@ -182,12 +195,32 @@ snapshot (and escalates to full if it is unreadable). The cycle then:
    render (Parquet stays) and stamps `trailing_year` in one manifest write;
 4. writes `trailing/status.json` at start and end, and prints
    `TRAILING {year} CYCLE COMPLETE full={0|1} secs={n}`;
-5. if the trailing year's `parquet/{Y}/team_years` digest changed, chains a
-   full current-year re-render plus `refresh_teams` (team pages embed every
+5. if the manifest's `chain_pending` is set after the cycle, chains a full
+   current-year re-render plus `refresh_teams` (team pages embed every
    season's team_years). From the endpoint this is a **separate HTTP
    request**, `GET /v3/data/reset_curr_year`, sent after the pipeline lock
    is released. From a job driver (`reprocess_year` of the live trailing
    year) it runs inline (`chain="inline"`) before the driver returns.
+
+### The chained current-year re-render
+
+Team pages embed every season's team_years, so a change to a past or
+trailing year's `parquet/{Y}/team_years` digest needs a full current-year
+re-render plus `refresh_teams`. The need is recorded in the manifest, not in
+process memory, so a process that dies between the publish and the chain
+loses nothing:
+
+- the manifest write that changes the digest sets `chain_pending: true` —
+  the trailing publish, or `write_parquet` (window close and every
+  past-year reprocess);
+- the full current-year publish (`publish_curr_year`, which
+  `reset_curr_year` and the inline chain run) clears it in its own manifest
+  write; a partial cycle leaves it set;
+- a trailing cycle or window close chains whenever the flag is set after
+  its work (the response's `chain`), and the gate schedules
+  `GET /v3/data/reset_curr_year` whenever the flag is set, the pipeline lock
+  is free and it scheduled no trailing action (the gate response's
+  `chain: true`).
 
 The daily TBA sweep skips the trailing year while the window is open
 (`normalize_cursor`), so nothing but trailing cycles writes it.
@@ -211,7 +244,8 @@ ordinary past year. It is stateless and rerunnable: it acts only while
    removed.
 3. One manifest write that sets `trailing_year: null`.
 4. Prints `TRAILING {year} CLOSE {not_needed|closed|error} secs={n}` and
-   chains the current-year re-render if the team_years digest changed.
+   chains the current-year re-render if `chain_pending` is set (step 2's
+   Parquet write sets it when the team_years digest changed).
 
 ### Past years: year epochs
 
@@ -266,13 +300,13 @@ automatic:
 
 | Command | Endpoint | Effect |
 |---|---|---|
-| `make reprocess-curr-year` | `/v3/data/reset_curr_year` | Full current-year recompute, fresh TBA fetch, **no etag gate**. Picks up events already on TBA. ~4–6 min. |
+| `make reprocess-curr-year` | `/v3/data/reset_curr_year` | Full current-year recompute, fresh TBA fetch, **no etag gate**. Picks up events already on TBA; clears `chain_pending`. ~4–6 min. Answers `{"status": "busy"}` (nothing ran) when the pipeline lock is held, as do `/v3/data/update_curr_year` and `/v3/data/refresh_teams`. |
 | `make reprocess-year YEAR=` | Cloud Run job | One past year via `reprocess_year()`: `process_year(partial=False)` + Parquet + `publish_past_year` (year epoch) + chained current-year re-render. For the trailing year while the trailing window is open it runs a full trailing cycle instead, chain inline. |
 | `make update-curr-year` | `/v3/site/update_curr_year` | Same cheap gated path as the hourly cron (manual poke). The JSON response carries `trailing`. |
 | curl (no make target) | `/v3/data/update_trailing_year?full=1` | One trailing cycle by hand (`full=0` resumes from the snapshot). Answers `{"status": "busy"}` without waiting when the pipeline lock is held, `skipped` when the window is closed. Normally the gate does this. |
 | curl (no make target) | `/v3/data/close_trailing_year` | Window close by hand: `not_needed` while the window is open or once done, else `closed`. Normally the gate does this. |
 | `make verify-trailing YEAR= EVENT=` | read-only GETs | Prints `trailing_year`, `hist_epochs`, the year's non-Parquet year keys; resolves `events/Y` and `event/EVENT` as the frontend does and compares with the API. Non-zero exit on disagreement, a missing event, or a differing `EXPECT_TEAMS` / `EXPECT_MATCHES`. |
-| `make info` | `/info` | `TRAILING_YEAR`, `TRAILING_WINDOW_OPEN`, `TRAILING_STATUS` (`trailing/status.json`), `HIST_EPOCHS`, `HIST_EPOCH_SHADOWED`, `MANIFEST_CONFLICTS`. |
+| `make info` | `/info` | `TRAILING_YEAR`, `TRAILING_WINDOW_OPEN`, `TRAILING_STATUS` (`trailing/status.json`), `HIST_EPOCHS`, `HIST_EPOCH_NEXT_MIN` (the smallest global `HIST_EPOCH` a future bump may use; `null` when the manifest is unreadable), `MANIFEST_CONFLICTS`. |
 | full history | `reset_all_years` | Rebuild 2002→present. See [historical-backfill.md](../deliverables/historical-backfill.md). |
 
 ## 6. Caveats and interactions
@@ -293,7 +327,9 @@ automatic:
   ([`backend/src/data/pipeline_lock.py`](../../../backend/src/data/pipeline_lock.py)),
   taken non-blocking: a trailing endpoint answers `{"status": "busy"}`, and the
   current-year cycle, the sweep and `refresh_teams` skip and print
-  `PIPELINE BUSY: skipped <name>`. A skipped cycle is caught up by the next
+  `PIPELINE BUSY: skipped <name>` (their endpoints answer
+  `{"status": "busy"}`). The gate itself skips its probes while the lock is
+  held (`reason: "pipeline-busy"`). A skipped cycle is caught up by the next
   gate tick. Across processes (two Cloud Run instances, a reprocess job)
   every `manifest.json` write goes through `update_manifest` with the
   **manifest precondition** (`if_generation_match` on the generation read),

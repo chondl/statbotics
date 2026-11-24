@@ -95,8 +95,8 @@ bucket) writes them under the epoch; `advanced` (any page missing or
 different) writes the whole year under `e + 1` and only then records
 `hist_epochs[year] = e + 1`. So a rebuild over a populated bucket replaces
 exactly the years whose data changed, with no `HIST_EPOCH` bump. Bump
-`HIST_EPOCH` only for a renderer change across all years, and above
-`max(hist_epochs)` (`/info` `HIST_EPOCH_SHADOWED`); the pipeline then
+`HIST_EPOCH` only for a renderer change across all years, and to at least
+`/info` `HIST_EPOCH_NEXT_MIN` (above `max(hist_epochs)`); the pipeline then
 gap-fills every year under `hist/{new_epoch}/…`. Uploads are thread-pooled; a
 full-history export is ~150k objects.
 

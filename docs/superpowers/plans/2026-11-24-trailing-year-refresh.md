@@ -27,7 +27,7 @@ Next.js 13 frontend (TypeScript 4.9), `node --test` on Node 24.
 - Full trailing cycles and window close fetch TBA fresh: `process_year(..., cache=False, ...)`.
 - Every `manifest.json` write goes through `update_manifest`: read pinned to one generation, `mutate` idempotent, write with `if_generation_match`; on `PreconditionFailed` re-read, re-apply, retry up to 5 times, then raise.
 - `read_manifest` returns `None` only on NotFound; any other failure raises `ManifestReadError`, and writers abort.
-- Hist resolution: a manifest entry wins; else `hist/{max(hist_epochs[year] ?? 0, hist_epoch)}/{path}`. A year-epoch advance allocates `e + 1` where `e` is that effective epoch. A global `HIST_EPOCH` bump must exceed `max(hist_epochs)`; `/info` reports `HIST_EPOCH_SHADOWED: true` when it does not.
+- Hist resolution: a manifest entry wins; else `hist/{max(hist_epochs[year] ?? 0, hist_epoch)}/{path}`. A year-epoch advance allocates `e + 1` where `e` is that effective epoch. A global `HIST_EPOCH` bump must exceed `max(hist_epochs)`; `/info` reports `HIST_EPOCH_NEXT_MIN`, the smallest value a bump may use (`null` when the manifest is unreadable).
 - Year-from-path: `event/{key}` → first 4 digits of key; `events/Y…`, `team_years/Y…`, `noteworthy_matches/Y…` → `Y`; `parquet/Y/…` → `Y`; `team/{num}/Y` (Y four digits) → `Y`; anything else → no year.
 - Site-blob renderers keep today's input order (no sorting), so renders match the existing `hist/2` bytes and no year advances without a data change.
 - Pipeline lock: `src.data.pipeline_lock.PIPELINE_LOCK` (`threading.Lock`). Trailing endpoints acquire non-blocking and return `{"status": "busy"}` if held; the current-year cycle, the sweep and `refresh_teams` acquire non-blocking and skip with a log line if held.
@@ -207,7 +207,7 @@ becomes Completed. Both are upstream past-year behaviour, tested in Task 6.
 - `trailing_gate_action() -> Optional[str]` → `"close" | "full" | "partial" | None`: `"close"` when close would act; `None` when the window is closed otherwise; `"full"` when `manifest.trailing_year != trailing_year()` or the trailing snapshot is unreadable; `"partial"` when `check_year_partial_tba(year, …)` is True; else None.
 - The site gate computes the current-year result as today, then **always** evaluates `trailing_gate_action()` inside `try/except` (an exception logs and yields `None`; the gate never 500s), including on the current-year early-return paths. Each positive result schedules its own background self-call: `/v3/data/update_trailing_year?full=1|0` or `/v3/data/close_trailing_year`. Response adds `"trailing": <action|null>`; current-year `status` values unchanged.
 - `GET /v3/data/update_trailing_year?full=` and `GET /v3/data/close_trailing_year` are plain `def` handlers.
-- `/info` adds `TRAILING_YEAR`, `TRAILING_WINDOW_OPEN`, `TRAILING_STATUS` (from `trailing/status.json`, best-effort), `HIST_EPOCHS` (best-effort), `HIST_EPOCH_SHADOWED`, `MANIFEST_CONFLICTS`.
+- `/info` adds `TRAILING_YEAR`, `TRAILING_WINDOW_OPEN`, `TRAILING_STATUS` (from `trailing/status.json`, best-effort), `HIST_EPOCHS` (best-effort), `HIST_EPOCH_NEXT_MIN`, `MANIFEST_CONFLICTS`.
 
 - [ ] **Step 1: Failing tests** — `test_gate_bootstraps_when_marker_absent`; `test_gate_partial_on_events_list_etag_change`; `test_gate_partial_on_match_change`; `test_gate_partial_on_dropped_candidate`; `test_gate_idle_when_unchanged`; `test_gate_closes_after_window`; `test_gate_idle_after_close_done`; `test_gate_trailing_runs_when_current_snapshot_unreadable`; `test_gate_survives_manifest_read_error`; existing `test_ping.py` gate tests pass with `"trailing"` added.
 - [ ] **Step 2: Run** → FAIL.
@@ -255,11 +255,11 @@ Run in order; record each output in the PR. Rollback before Mon 12-28: revert th
 2. Merge the PR; `git switch cph-staging && git pull --ff-only` in the primary checkout (`check-deploy-src` refuses any other branch).
 3. From `docs/superpowers/rig/deploy`: `make pause-cron` **before** shipping, then `make manifest-backup` (record the generation).
 4. `make ship` → both builds SUCCESS, both services 100% on the new revision (work the DEPLOY.md §2 checklist as todos).
-5. `make info` → `TRAILING_YEAR: 2026`, `TRAILING_WINDOW_OPEN: true`, `HIST_EPOCHS: {}`, `HIST_EPOCH_SHADOWED: false`, `MANIFEST_CONFLICTS: 0`.
+5. `make info` → `TRAILING_YEAR: 2026`, `TRAILING_WINDOW_OPEN: true`, `HIST_EPOCHS: {}`, `HIST_EPOCH_NEXT_MIN: 3` (deployed `HIST_EPOCH` 2, no year epochs), `MANIFEST_CONFLICTS: 0`.
 6. `make update-curr-year` → JSON with `"trailing": "full"`. Then `MIN=30 make pipeline-logs` until `TRAILING 2026 CYCLE COMPLETE full=1 secs=<n>` appears; record `n` and the chained `reset_curr_year` duration. `MIN=30 make pipeline-errors` → no `Traceback`, no `WORKER TIMEOUT`. `make info` → `TRAILING_STATUS.state: ok`.
 7. Wait 2 minutes (manifest edge + in-process caches), then `make verify-trailing YEAR=2026 EVENT=2026mmr EXPECT_TEAMS=32 EXPECT_MATCHES=40` → exit 0, `trailing_year 2026`, `2026mmr` in `events/2026`. Repeat `EVENT=2026mttd` and `EVENT=2026nhalt` → exit 0, status Completed.
 8. `make verify-event EVENT=2026mmr` → num_teams 32, matches count 40.
 9. Browser, fresh `playwright-cli` context: `https://statbotics.popcornpenguins.com/event/2026mmr` shows 32 teams and match results; the 2026 events page lists Minne Mini Regional; `/team/<attendee>/2026` lists the event. Screenshot each.
-10. `make update-curr-year` again → `"trailing": null`.
+10. `make update-curr-year` again → `"trailing": "partial"` once: the full trailing cycle fetched TBA fresh (`cache=False`) and stored no etags, so the first probe after the bootstrap sees every etag as new. (`"reason": "pipeline-busy"` means the bootstrap or its chained `reset_curr_year` still holds the pipeline lock: wait and repeat.) After that partial cycle's `TRAILING 2026 CYCLE COMPLETE full=0` appears in `make pipeline-logs`, `make update-curr-year` → `"trailing": null`, `"chain": false`.
 11. `make resume-cron`; `make smoke`; `make verify-web` → 200s and the legacy 301.
 12. Follow-ups recorded in the PR: Sun 12-06 – Tue 12-08 `make verify-trailing EVENT=2026isios` while it runs; after Mon 12-28 08:00 UTC `make verify-trailing YEAR=2026 EVENT=2026mmr` → `trailing_year null`, `hist_epochs {"2026": 3}`, 0 non-Parquet 2026 year keys, `make pipeline-logs` shows `TRAILING 2026 CLOSE closed`.
