@@ -112,7 +112,7 @@ def compress(data: Any) -> bytes:
 
 def expected_backfill_render(objs, teams) -> Dict[str, bytes]:
     """What backfill_blobs.backfill_year rendered + where it wrote it, for
-    these objects: the parity oracle for write_hist_blobs."""
+    these objects: the parity oracle for render_site_blobs."""
     year_obj = objs[0]
     team_years = list(objs[1].values())
     events = list(objs[2].values())

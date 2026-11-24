@@ -15,6 +15,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
+from src.constants import HIST_EPOCH
 from src.data import trailing
 from src.google import storage
 from src.google.publish import Manifest, historical_key
@@ -79,7 +80,12 @@ def publish_past_year(year: int, rendered: Dict[str, bytes], bucket: Any = None)
     # A ManifestReadError propagates before any upload: without the manifest
     # the effective epoch is unknown.
     manifest = storage.read_manifest(bucket) or Manifest()
-    e = effective_hist_epoch(manifest, year)
+    # Never below the code's HIST_EPOCH: the next update_manifest stamps
+    # hist_epoch = max(stored, HIST_EPOCH), so readers resolve at least that
+    # epoch. Probing the stored (older, or default 1 when there is no
+    # manifest) epoch would report "unchanged" after a global bump, write
+    # nothing under the new epoch, and leave every page of the year 404ing.
+    e = max(effective_hist_epoch(manifest, year), HIST_EPOCH)
 
     def probe(item: Any) -> str:
         path, data = item

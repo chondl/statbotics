@@ -14,7 +14,12 @@ import src.google.storage as storage
 from src.constants import HIST_EPOCH
 from src.data import trailing
 from src.google import year_epoch
-from src.google.publish import MANIFEST_OBJECT, Manifest, historical_key
+from src.google.publish import (
+    MANIFEST_OBJECT,
+    Manifest,
+    effective_hist_epoch,
+    historical_key,
+)
 from tests.fake_gcs import FakeBucket
 
 YEAR = 2020
@@ -132,6 +137,30 @@ def test_cold_year_gap_fills_under_global_epoch(bucket, capsys):
 def test_cold_year_without_manifest_gap_fills(bucket):
     assert year_epoch.publish_past_year(YEAR, rendered()) == "gap_filled"
     assert MANIFEST_OBJECT not in bucket.objects
+    # Manifest() defaults hist_epoch=1, but readers resolve the code's
+    # HIST_EPOCH once any manifest write stamps it: fill there.
+    for path, data in rendered().items():
+        assert bucket.objects[historical_key(HIST_EPOCH, path)] == data
+
+
+def test_global_bump_reexports_under_new_epoch(bucket, monkeypatch):
+    bumped = HIST_EPOCH + 1
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH))
+    seed_hist(bucket, HIST_EPOCH, rendered())
+    monkeypatch.setattr(year_epoch, "HIST_EPOCH", bumped)
+    monkeypatch.setattr(storage, "HIST_EPOCH", bumped)
+
+    # Unchanged data, but nothing exists under the bumped epoch yet.
+    assert year_epoch.publish_past_year(YEAR, rendered()) == "gap_filled"
+
+    # The next manifest write stamps hist_epoch=bumped; pages still resolve.
+    storage.update_manifest(lambda m: None, bucket)
+    m = stored(bucket)
+    assert m.hist_epoch == bumped
+    e = effective_hist_epoch(m, YEAR)
+    assert e == bumped
+    for path, data in rendered().items():
+        assert bucket.objects[historical_key(e, path)] == data
 
 
 def test_removes_shadowing_year_keys_but_keeps_parquet(bucket):
@@ -221,7 +250,7 @@ def test_advance_rerunnable_after_crash(bucket):
     assert year_epoch.publish_past_year(YEAR, new) == "unchanged"
 
 
-def test_refuses_live_year(bucket, monkeypatch):
+def test_refuses_live_year(bucket):
     with pytest.raises(ValueError, match="live year"):
         year_epoch.publish_past_year(constants.CURR_YEAR, rendered())
     assert bucket.uploads == []
