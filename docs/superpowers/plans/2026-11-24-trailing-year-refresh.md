@@ -33,7 +33,7 @@ Next.js 13 frontend (TypeScript 4.9), `node --test` on Node 24.
 - Pipeline lock: `src.data.pipeline_lock.PIPELINE_LOCK` (`threading.Lock`). Trailing endpoints acquire non-blocking and return `{"status": "busy"}` if held; the current-year cycle, the sweep and `refresh_teams` acquire non-blocking and skip with a log line if held.
 - `tzdata` is added to `backend/requirements.txt`.
 - Exact completion log lines (stdout): `TRAILING {year} CYCLE COMPLETE full={0|1} secs={n}`, `TRAILING {year} CLOSE {outcome} secs={n}`, `YEAR EPOCH {year} {unchanged|gap_filled|advanced} epoch={e}`.
-- Tests: `PY=/tmp/claude-1000/-repos-popcornpenguins-statbotics/a31463e1-e814-4c6a-8829-d9fb2483bbd1/scratchpad/venv/bin/python`, run `$PY -m pytest tests -q` from `backend/` (baseline 199 passed). Frontend: `node --test frontend/tests/` and `yarn build` from `frontend/`.
+- Tests: `PY=/tmp/claude-1000/-repos-popcornpenguins-statbotics/a31463e1-e814-4c6a-8829-d9fb2483bbd1/scratchpad/venv/bin/python`, run `$PY -m pytest tests -q` from `backend/` (baseline 199 passed). Frontend: `node --test frontend/tests/yearFromPath.test.mjs` and `yarn build` from `frontend/`.
 - Terms exactly as spec §3. Also: **gate** = `GET /v3/site/update_curr_year`; **bootstrap** = the first full trailing cycle of a rollover.
 
 **Deviation from spec §7 step 1 (recorded; spec amended in Task 9):** the final
@@ -227,7 +227,7 @@ becomes Completed. Both are upstream past-year behaviour, tested in Task 6.
 - Call sites compute `const live = await isLiveYear(year)` and pass `live` for `checkBucket` and TTL; the event-page ping effect awaits it. `team.tsx`'s reconstruct path stays `year !== CURR_YEAR`.
 
 - [ ] **Step 1: Failing test** `frontend/tests/yearFromPath.test.mjs` imports `../src/api/yearFromPath.ts`, reads `backend/tests/data/year_from_path_vectors.json` via `new URL(..., import.meta.url)`, asserts every vector, and `resolveHistEpoch`: no `hist_epochs` → `hist_epoch`; `{"2026":3}` with global 2 → 3 for `event/2026mmr`, 2 for `event/2025cc`, 2 for `teams/all`; global 4 beats 3.
-- [ ] **Step 2: Run** `node --test frontend/tests/` → FAIL.
+- [ ] **Step 2: Run** `node --test frontend/tests/yearFromPath.test.mjs` → FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** node test → PASS; `yarn build` (from `frontend/`) → "Compiled successfully".
 - [ ] **Step 5: Commit** `feat(frontend): live trailing year and per-year hist epochs`.
@@ -251,7 +251,7 @@ becomes Completed. Both are upstream past-year behaviour, tested in Task 6.
 
 Run in order; record each output in the PR. Rollback before Mon 12-28: revert the merge and `make ship` (old code ignores the new manifest fields; 2026 reverts to today's stale state). Rollback after window close: also restore `hist_epochs` handling, or 2026 falls back to the stale `hist/2/`.
 
-1. Local gate: `$PY -m pytest tests -q` (from `backend/`) → all pass; `node --test frontend/tests/` → pass; `yarn build` (from `frontend/`) → "Compiled successfully".
+1. Local gate: `$PY -m pytest tests -q` (from `backend/`) → all pass; `node --test frontend/tests/yearFromPath.test.mjs` → pass; `yarn build` (from `frontend/`) → "Compiled successfully".
 2. Merge the PR; `git switch cph-staging && git pull --ff-only` in the primary checkout (`check-deploy-src` refuses any other branch).
 3. From `docs/superpowers/rig/deploy`: `make pause-cron` **before** shipping, then `make manifest-backup` (record the generation).
 4. `make ship` → both builds SUCCESS, both services 100% on the new revision (work the DEPLOY.md §2 checklist as todos).

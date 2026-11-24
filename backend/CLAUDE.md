@@ -45,11 +45,24 @@ For each year, `process_year()` in `src/data/main.py` runs these steps in order:
    - `agg.py` — Aggregates match-level EPA up to event and year level.
    - `metrics.py` — Computes normalized EPA and derived statistics.
 
-Results are then published to GCS via `src/google/`: Parquet tables per year (`parquet.py`), the pickled state snapshot the next cycle resumes from (`snapshot.py`), and, for `year == CURR_YEAR`, the zlib-compressed site blobs the frontend reads (`storage.py`, `publish.py`). GCS is the only store.
+Results are then published to GCS via `src/google/`: Parquet tables per year (`parquet.py`), the pickled state snapshot the next cycle resumes from (`snapshot.py`), and the zlib-compressed site blobs the frontend reads (`storage.py`, `publish.py`). GCS is the only store. How the site blobs go out depends on the kind of year (`process_year`'s branches):
+- **`CURR_YEAR`** — versioned `v2/` blobs plus Parquet through the manifest, then the snapshot.
+- **The trailing year (`CURR_YEAR − 1`) while the trailing window is open** (until Dec 28 00:00 America/Los_Angeles of the trailing year; rule in `src/data/trailing.py`) — a *live year* too: current-year event statuses (Upcoming/Ongoing), and the **trailing publish** (`src/google/trailing_publish.py`): site blobs and Parquet as versioned `v2/` blobs in one manifest write, then the snapshot. Never hist blobs.
+- **Any other (past) year** — Parquet, then `year_epoch.publish_past_year`, which writes the site blobs under the year's **year epoch** (`hist/{e}/…`, see the gotcha below).
 
-**Two entry points** in `src/data/main.py`:
+Use `trailing.is_live_year(year)`, not `year == CURR_YEAR`, for behaviour an ongoing event needs; the comment block at the top of `src/data/trailing.py` classifies every `CURR_YEAR` use.
+
+**Entry points** in `src/data/main.py`:
 - `update_curr_year(partial=True)` — incremental update, resuming from the state snapshot. It refuses to run when the snapshot is unreadable rather than publishing near-empty artifacts over good ones.
 - `update_curr_year(partial=False)` / `reset_all_years()` — full recompute from scratch.
+- `update_trailing_year(full)` — one trailing cycle; `close_trailing_year()` — window close, which retires the trailing year into a past year after the window closes. The gate (`GET /v3/site/update_curr_year`, `src/data/router.py` `trailing_gate_action`) schedules both; see [DATA-REFRESH.md](../docs/superpowers/rig/DATA-REFRESH.md) §3.
+- `reprocess_year(year)` — one past year (the sweep and `make reprocess-year`); for a live trailing year it runs a full trailing cycle instead.
+
+**Pipeline lock** (`src/data/pipeline_lock.py`). The heavy pipelines take `PIPELINE_LOCK` through `try_hold()`, never blocking: the trailing endpoints answer `{"status": "busy"}`, and the current-year cycle, the sweep and `refresh_teams` skip and print `PIPELINE BUSY: skipped <name>`. `try_hold` is re-entrant per thread, so a sweep's reprocess can chain the current-year cycle and `refresh_teams` in the same thread. **Invariant: a held region never `await`s** — every `async def` handler runs on the one event-loop thread, so a coroutine awaiting under the lock would let another coroutine pass `try_hold` as the "owner". Hold it only around synchronous pipeline code; the trailing endpoints are plain `def` (FastAPI threadpool) for that reason.
+
+**Chained current-year re-render.** When a trailing cycle or window close changes the trailing year's `parquet/{Y}/team_years` digest, team pages (which embed every season) need a full current-year re-render plus `refresh_teams`. From the endpoints it is a separate HTTP request, `GET /v3/data/reset_curr_year`, sent from a daemon thread after the lock is released (inside the lock it would skip as busy). From `reprocess_year` / a Cloud Run job it runs inline (`chain="inline"`), because the job's process exits when the driver returns.
+
+**Manifest writes.** Every `manifest.json` write goes through `storage.update_manifest(mutate)`: a read pinned to one generation, the idempotent `mutate`, a write with `if_generation_match` (the manifest precondition); on a 412 it re-reads and re-applies, up to 5 retries, then raises and counts `MANIFEST_CONFLICTS` in `/info`. `read_manifest` returns `None` only when the object does not exist; any other failure raises `ManifestReadError` and the writer aborts (planning from an empty manifest would erase `hist_epochs`). Digest skips — `plan_uploads` and `_fold_parquet` deciding a path is unchanged — compare against the manifest read at plan time, not the one `update_manifest` re-reads at commit. That is safe because the planners run under `PIPELINE_LOCK`, so no other pipeline in the process changes those entries between plan and commit; the commit applies only the plan's delta, so another process's entries survive.
 
 ## EPA Model (`src/models/epa/`)
 
@@ -112,52 +125,64 @@ Where the data actually lives:
 | Pipeline resume state | A pickled + zstd-compressed snapshot in GCS (`src/google/snapshot.py`) |
 | Frontend reads | Pre-rendered zlib blobs plus a manifest in GCS (`src/google/storage.py`, `publish.py`) |
 
-### Past-year pages: hist blobs are immutable, and a stale one beats the API
+### Past-year pages: hist blobs are immutable, so a change moves the year epoch
 
-Historical (non-current-year) pages are served from `hist/{HIST_EPOCH}/…`
-objects written by `write_hist_blobs`, which **skips any object that already
-exists**. Recomputing a past year does not replace them: `reprocess-year
-YEAR=2025` republishes Parquet and recomputes everything correctly, and the
-site API immediately serves the new data — while the website keeps rendering
-the old blob.
+Past-year pages are served from `hist/{e}/…` objects, which are written with
+`Cache-Control: public, max-age=31536000, immutable` and must never be
+overwritten once readers resolve them. `e` is the year's **year epoch**,
+`max(hist_epochs[year] ?? 0, hist_epoch)`: `hist_epochs` is a per-year map in
+the manifest, `hist_epoch` the global epoch stamped from `HIST_EPOCH`
+(`src/constants.py`). The rule has one backend copy,
+`src/google/year_path.py` (`year_from_path`, `effective_hist_epoch`), mirrored
+by `frontend/src/api/yearFromPath.ts`; both test suites check the shared
+vectors in `tests/data/year_from_path_vectors.json`.
 
-The failure is silent by construction. `resolveBucketUrl` in
-`frontend/src/api/storage.tsx` falls back to `hist/{epoch}/{path}` for any
-logical path absent from `manifest.blobs`, and `fetchAndStore` only reaches
-the site API when the blob fetch **fails**. A stale-but-valid blob therefore
-wins over correct data, with no error anywhere.
+Every past-year reprocess — the daily sweep, `make reprocess-year`, window
+close, `reset_all_years` — publishes through
+`year_epoch.publish_past_year(year, rendered)`, which compares each rendered
+page with the object under `e` (MD5) and prints
+`YEAR EPOCH {year} {outcome} epoch={e}`:
+- `unchanged` — nothing written;
+- `gap_filled` — no object under `e` (a cold year): all written under `e`;
+- `advanced` — some page missing or different: all written under `e + 1`
+  (overwriting leftovers of a crashed advance; nobody resolves `e + 1` yet),
+  then `hist_epochs[year] = e + 1` in one manifest write.
 
-This bit the offseason work: after 2025 was reprocessed with per-event
-sandbox EPA, `/v3/site/team/254/2025` returned 5 team_events and 81 matches
-while `hist/1/team/254/2025` still held 3 and 49, so past-year team pages
-showed no offseason events at all.
+In every outcome the same manifest write removes the year's non-Parquet
+`manifest.blobs` entries, which would otherwise outrank its hist blobs. It
+refuses a live year (`ValueError("live year")`): no hist blob is ever written
+for one. So recomputing a past year now reaches its pages; no `HIST_EPOCH`
+bump is needed for a data change.
 
-> **Whenever you change what a past year's blobs should contain — new
-> ingestion, a new field, a renderer change — bump `HIST_EPOCH` in
-> `src/constants.py` and reprocess the affected years.** Recomputing alone is
-> not enough.
-
-Bumping invalidates *every* year, not just the one you changed. That is safe:
-years missing from the new epoch fall back to the site API, which serves the
-same data from Parquet. The daily TBA sweep does **not** refill the new epoch:
-`revalidate_tba` reprocesses a year only when a TBA path returned 200
-(`sweep.py`), so an unchanged year stays API-served until something reprocesses
-it.
-
-Two more traps on the same path, found with `2026mmr` after the 2027 rollover:
-
-- **Manifest entries outrank hist blobs.** `resolveBucketUrl` checks
-  `manifest.blobs` first, and `plan_uploads` carries every entry forward. The
-  last current-year cycle of a season leaves that year's `event/*`, `events/Y`
-  and `team_years/Y` entries in the manifest, frozen; no hist blob or epoch
-  bump can override them.
-- **Past-year events are never live.** `get_event_status` (`src/data/tba.py`)
-  uses Upcoming/Ongoing only for `CURR_YEAR`; for an older year an event with
-  no matches is Invalid (dropped from `events/Y`, no team events) and one with
-  matches is Completed (skipped by `check_year_partial`).
-
-The fix is designed in
+The history behind this: `write_hist_blobs` used to skip existing objects, so
+after 2025 was reprocessed with per-event sandbox EPA, `/v3/site/team/254/2025`
+returned 5 team_events and 81 matches while `hist/1/team/254/2025` still held
+3 and 49. The failure is silent by construction: `resolveBucketUrl` in
+`frontend/src/api/storage.tsx` resolves `manifest.blobs` first, then
+`hist/`, and `fetchAndStore` reaches the site API only when the blob fetch
+**fails**, so a stale-but-valid blob wins over correct data with no error.
+After the 2027 rollover `2026mmr` hit two more traps: the last current-year
+cycle of 2026 left frozen `event/*`, `events/2026` and `team_years/2026`
+manifest entries that outranked every hist blob, and `get_event_status`
+treated a past-year event with no matches as Invalid. Trailing cycles, window
+close and year epochs fix all three; the design is
 [the trailing-year refresh spec](../docs/superpowers/specs/2026-11-24-trailing-year-refresh-design.md).
+
+> **`HIST_EPOCH` is now only the lever for a renderer change across all
+> years.** A global bump must exceed `max(hist_epochs)`: the year epoch is a
+> `max`, so a year already advanced to an epoch at or above the new
+> `HIST_EPOCH` keeps serving its older render. `/info` reports
+> `HIST_EPOCH_SHADOWED: true` when the deployed `HIST_EPOCH` does not exceed
+> every entry. The next manifest write drops `hist_epochs` entries at or
+> below the global epoch.
+
+A global bump invalidates every year. Years missing from the new epoch fall
+back to the site API, which serves the same data from Parquet. The daily TBA
+sweep does **not** refill the new epoch: `revalidate_tba` reprocesses a year
+only when a TBA path returned 200 (`sweep.py`), so an unchanged year stays
+API-served until something reprocesses it. Site-blob renderers keep their
+input order (no sorting), so a re-render of unchanged data is byte-identical
+and does not advance a year epoch.
 
 ## TBA API (`src/tba/`)
 
@@ -232,8 +257,8 @@ before its roster went up could never re-enter. The per-event probes are tiered
 >    `read_tba.py`): they serve a tier-fresh pickle or refetch unconditionally
 >    (`get_tba(..., fresh=True)`). Events inside start−1d..end+1d probe fresh
 >    every cycle.
-> 2. `check_year_partial` ends with a **dropped-candidate sweep**: in-window
->    type-99 events absent from `event_objs` are probed fresh, and the gate
+> 2. `check_year_partial` ends with a **dropped-candidate sweep**: type-99
+>    events inside their event date window and absent from `event_objs` are probed fresh, and the gate
 >    escalates when one would now pass the filters — nothing else can trigger
 >    a recompute for an event the mirror never ingested (its match etags are
 >    unchecked, the events-list etag doesn't move, and no page exists to ping).
@@ -256,9 +281,22 @@ which needs the announced game. (There is no `CURR_WEEK` constant any more.)
   team order (prior seasons' `norm_epa`) is what is meaningful.
 - Deploy, then `make reprocess-curr-year`: the old year's state snapshot
   does not carry over, so hourly partial cycles skip (`PARTIAL_SKIPPED` in
-  `/info`) until a full reset writes the new year's snapshot. Then
-  `make reprocess-year YEAR=<old year>` so the old year gets its `hist/`
-  blobs (written only for non-current years).
+  `/info`) until a full reset writes the new year's snapshot.
+- Nothing to do for the old year. It becomes the **trailing year** and stays
+  a live year until **Dec 28 00:00 America/Los_Angeles** of that year (the
+  trailing window, a code rule in `src/data/trailing.py`): the gate's first
+  tick after the deploy runs the bootstrap (a full trailing cycle; `make
+  update-curr-year` answers `"trailing": "full"`), and from then on its
+  offseason events refresh like current-year events. On the first gate tick
+  after Dec 28 00:00 PT, window close retires it: a final fresh cycle,
+  its site blobs under a new year epoch, its non-Parquet manifest entries
+  removed, `trailing_year: null`. A rollover shipped after Dec 28 skips the
+  trailing window: the first gate tick runs window close straight away,
+  because the old year's current-year manifest entries are still there. Do
+  **not** run `make reprocess-year
+  YEAR=<old year>` as part of the rollover. Check with `make info`
+  (`TRAILING_YEAR`, `TRAILING_WINDOW_OPEN`, `TRAILING_STATUS`) and
+  `make verify-trailing YEAR=<old year> EVENT=<event key>`.
 - Districts: compare TBA's `/districts/{YEAR}` with `VALID_DISTRICTS`; an
   unknown one is flattened to no district and logged as
   `WARNING: unknown district`.
