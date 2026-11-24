@@ -741,6 +741,12 @@ def close_needed(manifest: Optional[Any], year: int) -> bool:
     )
 
 
+def close_would_act(manifest: Optional[Any], year: int) -> bool:
+    """Window close has work to do now: the trailing window is closed and
+    close_needed holds. The gate and close_trailing_year share this rule."""
+    return not trailing.trailing_window_open() and close_needed(manifest, year)
+
+
 def close_trailing_year(chain: str = CHAIN_HTTP) -> Dict[str, Any]:
     """Window close (spec §7, with the plan's past-year deviation): retire
     the trailing year into an ordinary past year. Stateless and rerunnable:
@@ -760,7 +766,7 @@ def _close_trailing_year_held() -> Dict[str, Any]:
 
     # A ManifestReadError propagates: without the manifest, nothing is known.
     manifest = None if trailing.trailing_window_open() else read_manifest()
-    if trailing.trailing_window_open() or not close_needed(manifest, year):
+    if not close_would_act(manifest, year):
         print(f"TRAILING {year} CLOSE not_needed secs={_secs(start)}")
         return {"status": "not_needed", "year": year}
     assert manifest is not None

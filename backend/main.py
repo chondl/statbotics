@@ -1,5 +1,5 @@
 import platform
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Optional
 
 from dotenv import load_dotenv  # type: ignore
 
@@ -13,7 +13,7 @@ load_dotenv()
 # flake8: noqa E402
 from src.api.router import router as api_router
 from src.auth import generate_api_key, get_api_key
-from src.constants import PROD
+from src.constants import HIST_EPOCH, PROD
 from src.data.router import (
     data_router as data_data_router,
     site_router as data_site_router,
@@ -70,12 +70,41 @@ async def read_root():
     return {"Hello": "World"}
 
 
+def hist_epoch_shadowed(hist_epochs: Dict[str, int]) -> bool:
+    """A global HIST_EPOCH bump must exceed every year epoch, or the years
+    holding a higher epoch keep serving their older renders."""
+    return HIST_EPOCH <= max(hist_epochs.values(), default=0)
+
+
+def _read_hist_epochs() -> Optional[Dict[str, int]]:
+    from src.google import storage as gcs_storage
+
+    try:
+        manifest = gcs_storage.read_manifest()
+        return dict(manifest.hist_epochs) if manifest is not None else {}
+    except Exception:
+        return None
+
+
 @router.get("/info")
 def get_info():
     from src.data import main as data_main
+    from src.data import trailing
     from src.google import storage as gcs_storage
+    from src.google import trailing_publish
+
+    hist_epochs = _read_hist_epochs()
+    try:
+        trailing_status = trailing_publish.read_trailing_status()
+    except Exception:
+        trailing_status = None
 
     return {
+        "TRAILING_YEAR": trailing.trailing_year(),
+        "TRAILING_WINDOW_OPEN": trailing.trailing_window_open(),
+        "TRAILING_STATUS": trailing_status,
+        "HIST_EPOCHS": hist_epochs,
+        "HIST_EPOCH_SHADOWED": hist_epoch_shadowed(hist_epochs or {}),
         "MANIFEST_CONFLICTS": gcs_storage.manifest_conflicts,
         "PROD": PROD,
         "PYTHON_VERSION": platform.python_version(),

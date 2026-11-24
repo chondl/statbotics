@@ -103,6 +103,17 @@ def write_trailing_status(status: Dict[str, Any]) -> None:
         print("WARNING: trailing/status.json write failed")
 
 
+def read_trailing_status() -> Optional[Dict[str, Any]]:
+    """``trailing/status.json`` for /info; best-effort, None on any error
+    (including absent or unparseable)."""
+    try:
+        raw = storage._bucket().blob(TRAILING_STATUS_OBJECT).download_as_bytes()
+        status = json.loads(raw)
+        return status if isinstance(status, dict) else None
+    except Exception:
+        return None
+
+
 def team_years_digest(year: int) -> Optional[str]:
     """The manifest digest of ``parquet/{year}/team_years.parquet``."""
     manifest = storage.read_manifest()
