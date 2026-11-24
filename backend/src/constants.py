@@ -29,8 +29,8 @@ DISABLE_GCS = False
 # hist_epoch) (src/google/year_path.py). A data change to a past year no
 # longer needs a bump: year_epoch.publish_past_year moves just that year to a
 # new year epoch. Bump this only for a renderer change across all years, and
-# then above max(hist_epochs), or the years already advanced keep their older
-# render (/info HIST_EPOCH_SHADOWED). Years not yet re-exported into a new
+# then to at least /info HIST_EPOCH_NEXT_MIN (above max(hist_epochs)), or the
+# years already advanced keep their older render. Years not yet re-exported into a new
 # global epoch fall back to the site API, which serves the same data from
 # Parquet; the daily TBA sweep does NOT refill them (it reprocesses a year
 # only on a TBA 200).

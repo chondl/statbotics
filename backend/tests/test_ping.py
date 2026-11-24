@@ -14,6 +14,7 @@ def make_client(monkeypatch, last_probe=float("-inf"), inflight=False):
     monkeypatch.setattr(dr, "_ping_inflight", inflight)
     # The trailing half of the gate is covered by test_trailing_gate.py.
     monkeypatch.setattr(dr, "trailing_gate_action", lambda: None)
+    monkeypatch.setattr(dr, "chain_gate_pending", lambda: False)
     app = FastAPI()
     app.include_router(dr.site_router, prefix="/v3/site")
     return TestClient(app), calls
@@ -87,6 +88,7 @@ def test_site_update_dbless_snapshot_miss_skips_probe(monkeypatch):
         "status": "skipped",
         "reason": "snapshot-unreadable",
         "trailing": None,
+        "chain": False,
     }
     # A persistent snapshot failure must be visible at /info, not hidden
     # behind an ordinary-looking skip.
@@ -100,7 +102,7 @@ def test_site_update_dbless_snapshot_hit_probes_and_backgrounds(monkeypatch):
     monkeypatch.setattr(dr, "check_year_partial_tba", lambda y, e, t: True)
     client, calls = make_client(monkeypatch)
     resp = client.get("/v3/site/update_curr_year")
-    assert resp.json() == {"status": "backgrounded", "trailing": None}
+    assert resp.json() == {"status": "backgrounded", "trailing": None, "chain": False}
     assert len(calls) == 1
     assert calls[0].endswith("/v3/data/update_curr_year")
 

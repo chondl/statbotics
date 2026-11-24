@@ -41,7 +41,8 @@ def _require_live(year: int) -> None:
 def trailing_publish(year: int, objs: objs_type, teams: List[Team]) -> bool:
     """Publish the trailing year's site blobs and Parquet in one manifest
     write; unchanged paths upload nothing. Returns whether
-    ``parquet/{year}/team_years.parquet`` changed. Raises TrailingClosed
+    ``parquet/{year}/team_years.parquet`` changed; when it did, the same
+    manifest write sets ``chain_pending``. Raises TrailingClosed
     (writing no manifest) once the window has closed, and lets a
     ManifestReadError propagate before any upload."""
     _require_live(year)
@@ -54,10 +55,17 @@ def trailing_publish(year: int, objs: objs_type, teams: List[Team]) -> bool:
     storage._fold_parquet(plan, prev, parquet)
     team_years_changed = parquet_logical(year, "team_years") in plan.blob_updates
 
+    def mutate(m: Manifest) -> None:
+        _require_live(year)
+        # Same write as the digest change: a crash before the chained
+        # current-year re-render leaves the gate a record to act on.
+        if team_years_changed:
+            m.chain_pending = True
+
     if plan.uploads or plan.blob_updates or plan.blob_removals:
         # The plan's delta is applied only to the in-memory copy; the guard
         # raising aborts the whole write.
-        storage._publish(plan, mutate=lambda m: _require_live(year), legacy=False)
+        storage._publish(plan, mutate=mutate, legacy=False)
     else:
         _require_live(year)
 
@@ -114,9 +122,12 @@ def read_trailing_status() -> Optional[Dict[str, Any]]:
         return None
 
 
-def team_years_digest(year: int) -> Optional[str]:
-    """The manifest digest of ``parquet/{year}/team_years.parquet``."""
-    manifest = storage.read_manifest()
-    if manifest is None:
-        return None
-    return manifest.hash_for(parquet_logical(year, "team_years"))
+def chain_pending_now() -> bool:
+    """The manifest's chain_pending flag; False (logged) when the manifest
+    cannot be read — the flag stays in GCS and the gate acts on it later."""
+    try:
+        manifest = storage.read_manifest()
+    except Exception as e:
+        print(f"WARNING: chain_pending unreadable ({type(e).__name__}: {e}); the gate will chain")
+        return False
+    return manifest is not None and manifest.chain_pending

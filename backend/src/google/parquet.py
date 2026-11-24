@@ -89,4 +89,14 @@ def write_parquet(year: int, objs: objs_type, teams: List[Team]) -> None:
         updates[logical] = key
 
     if updates:
-        update_manifest(lambda m: m.blobs.update(updates), bucket)
+        # A changed team_years digest makes team pages (which embed every
+        # season) stale until the chained current-year re-render publishes:
+        # chain_pending records that in this same manifest write.
+        chain = parquet_logical(year, "team_years") in updates
+
+        def mutate(m: Manifest) -> None:
+            m.blobs.update(updates)
+            if chain:
+                m.chain_pending = True
+
+        update_manifest(mutate, bucket)

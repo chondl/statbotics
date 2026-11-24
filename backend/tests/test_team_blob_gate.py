@@ -188,7 +188,7 @@ def run_write_objs(monkeypatch, objs, orig_objs, teams, orig_teams, prev_manifes
         rec.rendered = dict(rendered)
         return real_plan_uploads(rendered, prev, cycle)
 
-    def fake_publish(plan: UploadPlan):
+    def fake_publish(plan: UploadPlan, mutate=None):
         # What update_manifest would commit over the previous manifest.
         rec.plan = plan
         rec.manifest = deepcopy(prev_manifest) if prev_manifest else Manifest()

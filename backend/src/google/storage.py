@@ -282,7 +282,10 @@ def write_objs(
     teams: Optional[List[Team]] = None,
     parquet: Optional[Dict[str, bytes]] = None,
     orig_teams: Optional[List[Team]] = None,
+    mutate: Optional[Callable[[Manifest], None]] = None,
 ) -> None:
+    """Current-year site publish. ``mutate`` is applied inside the same
+    manifest write (publish_curr_year clears chain_pending with it)."""
     year = CURR_YEAR
     year_obj = objs[0]
 
@@ -433,7 +436,7 @@ def write_objs(
         # last: DuckDB and the frontend never disagree by a cycle, and a partial
         # read can never clobber the site-blob references.
         _fold_parquet(plan, prev, parquet)
-    _publish(plan)
+    _publish(plan, mutate=mutate)
 
     return
 

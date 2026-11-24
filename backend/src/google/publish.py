@@ -23,7 +23,15 @@ HIST_PREFIX = "hist"
 HASH_LEN = 12
 SCHEMA = 1
 
-_KNOWN_FIELDS = {"schema", "cycle", "hist_epoch", "blobs", "trailing_year", "hist_epochs"}
+_KNOWN_FIELDS = {
+    "schema",
+    "cycle",
+    "hist_epoch",
+    "blobs",
+    "trailing_year",
+    "hist_epochs",
+    "chain_pending",
+}
 
 
 def content_hash(data: bytes) -> str:
@@ -50,6 +58,13 @@ class Manifest:
     # Year (string) -> epoch, each above hist_epoch. Correctness-critical:
     # every writer carries it forward (storage.update_manifest).
     hist_epochs: Dict[str, int] = field(default_factory=dict)
+    # A past or trailing year's parquet/{Y}/team_years digest changed and the
+    # chained current-year re-render (team pages embed every season) has not
+    # yet published. Set in the same manifest write that changed the digest;
+    # cleared by the full current-year publish; the gate schedules
+    # GET /v3/data/reset_curr_year while it is set. Survives a crash between
+    # the publish and the chain.
+    chain_pending: bool = False
     # Unknown top-level keys, carried through untouched so an older writer
     # never strips a newer writer's fields.
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -70,6 +85,7 @@ class Manifest:
                 "blobs": self.blobs,
                 "trailing_year": self.trailing_year,
                 "hist_epochs": self.hist_epochs,
+                "chain_pending": self.chain_pending,
             }
         )
         return json.dumps(data, sort_keys=True)
@@ -96,6 +112,7 @@ class Manifest:
             hist_epochs={
                 str(k): int(v) for k, v in (data.get("hist_epochs") or {}).items()
             },
+            chain_pending=bool(data.get("chain_pending", False)),
             extra={k: v for k, v in data.items() if k not in _KNOWN_FIELDS},
         )
 

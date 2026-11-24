@@ -146,6 +146,11 @@ def bucket(monkeypatch):
     return b
 
 
+def clear_chain_pending() -> None:
+    """What the full current-year publish does to the flag."""
+    storage.update_manifest(data_main._clear_chain_pending)
+
+
 class Pipeline:
     def __init__(self):
         self.source = make_source()
@@ -171,7 +176,10 @@ def pipe(monkeypatch, bucket):
         return deepcopy(TEAMS)
 
     def chain():
+        # Stands in for the chained GET /v3/data/reset_curr_year, whose full
+        # current-year publish clears chain_pending.
         p.chains += 1
+        clear_chain_pending()
 
     monkeypatch.setattr(data_main, "DISABLE_GCS", False)
     monkeypatch.setattr(data_main, "tba_cache", NoTbaCache())
@@ -226,7 +234,9 @@ def test_partial_without_snapshot_escalates_to_full(pipe, trailing_open):
     assert pipe.tba_calls == [(Y, False, False)]
 
 
-def test_bootstrap_publishes_then_snapshot_then_marker(pipe, bucket, trailing_open):
+def test_bootstrap_publishes_then_snapshot_then_marker(pipe, bucket, monkeypatch, trailing_open):
+    # No chained re-render here: only the cycle's own manifest writes count.
+    monkeypatch.setattr(data_main, "_schedule_reset_curr_year", lambda: None)
     seed(bucket, Manifest(hist_epoch=HIST_EPOCH))
     bucket.uploads.clear()
 
@@ -691,7 +701,8 @@ def test_reprocess_year_delegate_chains_inline(pipe, monkeypatch, trailing_open)
         "update_curr_year",
         lambda partial, tba_partial: steps.append(
             ("update_curr_year", partial, tba_partial, PIPELINE_LOCK.locked())
-        ),
+        )
+        or clear_chain_pending(),
     )
     monkeypatch.setattr(
         data_main, "refresh_teams", lambda: steps.append(("refresh_teams",)) or {}
@@ -721,7 +732,9 @@ def test_close_chains_inline_when_asked(pipe, bucket, monkeypatch):
     pipe.chains = 0
     steps = []
     monkeypatch.setattr(
-        data_main, "update_curr_year", lambda partial, tba_partial: steps.append("curr")
+        data_main,
+        "update_curr_year",
+        lambda partial, tba_partial: steps.append("curr") or clear_chain_pending(),
     )
     monkeypatch.setattr(data_main, "refresh_teams", lambda: steps.append("teams") or {})
     pipe.source = make_source(extra_team=True)
@@ -752,3 +765,109 @@ def test_process_year_live_branch_publishes_parquet_and_snapshot(pipe, bucket, t
     assert {f"parquet/{Y}/{t}.parquet" for t in ("team_years", "events", "matches")} <= set(m.blobs)
     assert bucket.uploads.count(MANIFEST_OBJECT) == 1  # one manifest write
     assert snapshot.snapshot_key(Y) in bucket.objects
+
+
+# ------------------------------------------------------------ chain_pending
+
+
+def test_chain_pending_set_in_the_trailing_publish_write(pipe, bucket, trailing_open):
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH))
+    tp.trailing_publish(Y, make_source(), deepcopy(TEAMS))
+    publish = manifest_versions(bucket)[-1]
+    # The write that changed the team_years digest carries the flag.
+    assert f"parquet/{Y}/team_years.parquet" in publish.blobs
+    assert publish.chain_pending is True
+
+
+def test_chain_pending_not_set_when_team_years_unchanged(pipe, bucket, trailing_open):
+    tp.trailing_publish(Y, make_source(), deepcopy(TEAMS))
+    clear_chain_pending()
+    tp.trailing_publish(Y, make_source(casj_score=150), deepcopy(TEAMS))
+    assert stored(bucket).chain_pending is False
+
+
+def test_chain_pending_set_in_the_close_parquet_write(pipe, bucket, monkeypatch):
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH))
+    bootstrap_open(monkeypatch)  # chains (fake) and clears
+    assert stored(bucket).chain_pending is False
+    pipe.source = make_source(extra_team=True)
+    n = len(manifest_versions(bucket))
+    data_main.close_trailing_year()
+    parquet_write = manifest_versions(bucket)[n]  # close's first manifest write
+    assert parquet_write.chain_pending is True
+    assert parquet_write.trailing_year == Y  # before the marker clear
+
+
+def test_crash_before_chain_then_gate_still_chains(pipe, bucket, monkeypatch, trailing_open):
+    """The process dies after the trailing publish and before the chained
+    request: the flag in GCS is what makes the next gate tick chain."""
+    import src.data.router as dr
+    from fastapi import BackgroundTasks
+
+    def die():
+        raise SystemExit("process killed before the chain was sent")
+
+    monkeypatch.setattr(data_main, "_schedule_reset_curr_year", die)
+    with pytest.raises(SystemExit):
+        data_main.update_trailing_year(full=True)
+    assert stored(bucket).chain_pending is True
+
+    # Re-run: a quiet partial cycle still reports (and HTTP-chains) the flag.
+    sent = []
+    monkeypatch.setattr(data_main, "_schedule_reset_curr_year", lambda: sent.append(1))
+    assert data_main.update_trailing_year(full=False)["chain"] is True
+    assert sent == [1]
+
+    # The gate, with no trailing action, schedules the chain from the flag.
+    tasks = BackgroundTasks()
+    assert dr._schedule_chain(tasks, None) is True
+    assert [t.func for t in tasks.tasks] == [dr.reset_curr_year_background]
+
+
+def test_full_curr_year_publish_clears_chain_pending(bucket, monkeypatch):
+    from src.constants import CURR_YEAR
+
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH, chain_pending=True))
+    monkeypatch.setattr(data_main, "DISABLE_GCS", False)
+    monkeypatch.setattr(data_main, "get_team_event_teams_db", lambda: [])
+    monkeypatch.setattr(storage, "get_team_years_db", lambda **kw: [])
+    monkeypatch.setattr(storage, "get_events_db", lambda **kw: [])
+    objs = (Year(year=CURR_YEAR), {}, {}, {}, {}, {})
+    data_main.publish_curr_year(objs, [])
+    assert stored(bucket).chain_pending is False
+
+
+def test_partial_curr_year_publish_keeps_chain_pending(bucket, monkeypatch):
+    from src.constants import CURR_YEAR
+
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH, chain_pending=True))
+    monkeypatch.setattr(storage, "get_team_years_db", lambda **kw: [])
+    monkeypatch.setattr(storage, "get_events_db", lambda **kw: [])
+    objs = (Year(year=CURR_YEAR), {}, {}, {}, {}, {})
+    storage.write_objs(objs, deepcopy(objs), [], None, [])
+    # A partial cycle does not re-render every team page: the flag stays.
+    assert stored(bucket).chain_pending is True
+
+
+def test_inline_chain_clears_chain_pending(pipe, bucket, monkeypatch, trailing_open):
+    """reprocess_year's inline chain runs the real full current-year cycle,
+    whose publish clears the flag."""
+    from src.constants import CURR_YEAR
+
+    seen = []
+
+    def fake_held(partial, tba_partial):
+        seen.append((partial, tba_partial))
+        data_main.publish_curr_year((Year(year=CURR_YEAR), {}, {}, {}, {}, {}), [])
+
+    monkeypatch.setattr(data_main, "_update_curr_year_held", fake_held)
+    monkeypatch.setattr(data_main, "_refresh_teams_held", lambda: {})
+    monkeypatch.setattr(data_main, "get_team_event_teams_db", lambda: [])
+    monkeypatch.setattr(storage, "get_team_years_db", lambda **kw: [])
+    monkeypatch.setattr(storage, "get_events_db", lambda **kw: [])
+
+    result = data_main.update_trailing_year(full=True, chain="inline")
+    assert result["chain"] is True  # the flag the trailing publish set
+    assert seen == [(False, False)]
+    assert stored(bucket).chain_pending is False
+    assert pipe.chains == 0  # no HTTP self-call

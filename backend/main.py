@@ -70,10 +70,14 @@ async def read_root():
     return {"Hello": "World"}
 
 
-def hist_epoch_shadowed(hist_epochs: Dict[str, int]) -> bool:
-    """A global HIST_EPOCH bump must exceed every year epoch, or the years
-    holding a higher epoch keep serving their older renders."""
-    return HIST_EPOCH <= max(hist_epochs.values(), default=0)
+def hist_epoch_next_min(hist_epochs: Optional[Dict[str, int]]) -> Optional[int]:
+    """The smallest global HIST_EPOCH a future bump must use: above every
+    year epoch (the year epoch is a max, so a year at or above the new
+    HIST_EPOCH keeps serving its older render) and above the deployed
+    HIST_EPOCH. None when the manifest is unreadable."""
+    if hist_epochs is None:
+        return None
+    return max([HIST_EPOCH, *hist_epochs.values()]) + 1
 
 
 def _read_hist_epochs() -> Optional[Dict[str, int]]:
@@ -104,7 +108,7 @@ def get_info():
         "TRAILING_WINDOW_OPEN": trailing.trailing_window_open(),
         "TRAILING_STATUS": trailing_status,
         "HIST_EPOCHS": hist_epochs,
-        "HIST_EPOCH_SHADOWED": hist_epoch_shadowed(hist_epochs or {}),
+        "HIST_EPOCH_NEXT_MIN": hist_epoch_next_min(hist_epochs),
         "MANIFEST_CONFLICTS": gcs_storage.manifest_conflicts,
         "PROD": PROD,
         "PYTHON_VERSION": platform.python_version(),

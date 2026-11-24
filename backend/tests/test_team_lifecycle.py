@@ -204,7 +204,8 @@ class PipelineHarness:
             self.snapshot_calls.append((year, deepcopy(teams)))
 
         def fake_write_objs_storage(
-            objs, orig_objs=None, teams=None, parquet=None, orig_teams=None
+            objs, orig_objs=None, teams=None, parquet=None, orig_teams=None,
+            mutate=None,
         ):
             self.events.append("storage")
             self.storage_calls.append(

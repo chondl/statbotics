@@ -59,6 +59,16 @@ def test_manifest_round_trips_new_and_unknown_fields():
     # Defaults: absent fields parse to None / {} / {}.
     old = Manifest.from_json('{"schema": 1, "cycle": "", "hist_epoch": 2, "blobs": {}}')
     assert old.trailing_year is None and old.hist_epochs == {} and old.extra == {}
+    assert old.chain_pending is False
+
+
+def test_manifest_round_trips_chain_pending():
+    m = Manifest(chain_pending=True)
+    data = json.loads(m.to_json())
+    assert data["chain_pending"] is True and "chain_pending" not in m.extra
+    back = Manifest.from_json(m.to_json())
+    assert back.chain_pending is True and back.extra == {}
+    assert json.loads(Manifest().to_json())["chain_pending"] is False
 
 
 def test_effective_epoch_max_rule():
