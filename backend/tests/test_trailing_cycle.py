@@ -666,7 +666,9 @@ def test_close_rerun_after_crash_at_each_step(pipe, bucket, monkeypatch, crash):
 def test_reprocess_year_of_live_year_delegates(monkeypatch, trailing_open):
     calls = []
     monkeypatch.setattr(
-        data_main, "update_trailing_year", lambda full: calls.append(full) or {}
+        data_main,
+        "update_trailing_year",
+        lambda full, chain="http": calls.append((full, chain)) or {},
     )
 
     def boom(*a, **k):
@@ -677,7 +679,71 @@ def test_reprocess_year_of_live_year_delegates(monkeypatch, trailing_open):
     monkeypatch.setattr(data_main, "refresh_teams", boom)
 
     data_main.reprocess_year(Y)
-    assert calls == [True]
+    assert calls == [(True, "inline")]
+
+
+def test_reprocess_year_delegate_chains_inline(pipe, monkeypatch, trailing_open):
+    """A job driver's process exits when reprocess_year returns: the chained
+    current-year re-render runs synchronously, never as an HTTP self-call."""
+    steps = []
+    monkeypatch.setattr(
+        data_main,
+        "update_curr_year",
+        lambda partial, tba_partial: steps.append(
+            ("update_curr_year", partial, tba_partial, PIPELINE_LOCK.locked())
+        ),
+    )
+    monkeypatch.setattr(
+        data_main, "refresh_teams", lambda: steps.append(("refresh_teams",)) or {}
+    )
+
+    def no_http():
+        raise AssertionError("no HTTP self-call from a job driver")
+
+    monkeypatch.setattr(data_main, "_schedule_reset_curr_year", no_http)
+
+    data_main.reprocess_year(Y)  # first publish: team_years new
+    assert steps == [("update_curr_year", False, False, True), ("refresh_teams",)]
+
+    steps.clear()
+    pipe.source = make_source(casj_score=150)  # team_years unchanged
+    data_main.reprocess_year(Y)
+    assert steps == []
+
+    pipe.source = make_source(casj_score=150, extra_team=True)
+    data_main.reprocess_year(Y)
+    assert steps == [("update_curr_year", False, False, True), ("refresh_teams",)]
+
+
+def test_close_chains_inline_when_asked(pipe, bucket, monkeypatch):
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH))
+    bootstrap_open(monkeypatch)
+    pipe.chains = 0
+    steps = []
+    monkeypatch.setattr(
+        data_main, "update_curr_year", lambda partial, tba_partial: steps.append("curr")
+    )
+    monkeypatch.setattr(data_main, "refresh_teams", lambda: steps.append("teams") or {})
+    pipe.source = make_source(extra_team=True)
+    assert data_main.close_trailing_year(chain="inline")["chain"] is True
+    assert steps == ["curr", "teams"] and pipe.chains == 0
+
+
+def test_bad_chain_value_rejected():
+    with pytest.raises(ValueError):
+        data_main.update_trailing_year(full=True, chain="later")
+
+
+def test_disable_gcs_skips_trailing_cycle_and_close(pipe, bucket, monkeypatch, trailing_open):
+    monkeypatch.setattr(data_main, "DISABLE_GCS", True)
+    result = data_main.update_trailing_year(full=True)
+    assert result == {"status": "skipped", "reason": "gcs-disabled", "year": Y}
+    assert pipe.tba_calls == [] and bucket.uploads == [] and pipe.chains == 0
+    set_window(monkeypatch, False)
+    seed(bucket, Manifest(hist_epoch=HIST_EPOCH, trailing_year=Y))
+    bucket.uploads.clear()
+    assert data_main.close_trailing_year()["status"] == "not_needed"
+    assert bucket.uploads == [] and stored(bucket).trailing_year == Y
 
 
 def test_process_year_live_branch_publishes_parquet_and_snapshot(pipe, bucket, trailing_open):

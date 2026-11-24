@@ -461,7 +461,9 @@ def reprocess_year(year_num: int) -> None:
     trailing cycle (update_trailing_year), which publishes through the
     manifest and chains the current-year re-render itself when needed."""
     if year_num != CURR_YEAR and trailing.is_live_year(year_num):
-        update_trailing_year(full=True)
+        # Inline chain: a job driver's process exits when this returns, so
+        # an HTTP self-call from a daemon thread would die with it.
+        update_trailing_year(full=True, chain=CHAIN_INLINE)
         return
 
     timer = Timer()
@@ -622,19 +624,48 @@ def _schedule_reset_curr_year() -> None:
     threading.Thread(target=call, name="chain-reset-curr-year", daemon=True).start()
 
 
-def update_trailing_year(full: bool) -> Dict[str, Any]:
-    """One trailing cycle for the trailing year (spec §5.2). Returns
-    {"status": "busy"} without waiting when another pipeline holds the
-    lock."""
+CHAIN_HTTP = "http"
+CHAIN_INLINE = "inline"
+
+
+def _chain_inline() -> None:
+    """The chained full current-year re-render, synchronously in this
+    thread (the caller holds the lock; try_hold is re-entrant for it)."""
+    update_curr_year(partial=False, tba_partial=False)
+    refresh_teams()
+
+
+def _run_with_chain(
+    name: str, work: Any, chain: str
+) -> Dict[str, Any]:
+    if chain not in (CHAIN_HTTP, CHAIN_INLINE):
+        raise ValueError(f"chain must be {CHAIN_HTTP!r} or {CHAIN_INLINE!r}")
     with try_hold() as held:
         if not held:
-            print("PIPELINE BUSY: skipped update_trailing_year")
+            print(f"PIPELINE BUSY: skipped {name}")
             return {"status": "busy"}
-        result = _update_trailing_year_held(full)
-    # After the lock is released, or the chained cycle would skip as busy.
-    if result.get("chain"):
+        result = work()
+        if result.get("chain") and chain == CHAIN_INLINE:
+            _chain_inline()
+    # The HTTP chain is scheduled after the lock is released, or the chained
+    # request would skip as busy.
+    if result.get("chain") and chain == CHAIN_HTTP:
         _schedule_reset_curr_year()
     return result
+
+
+def update_trailing_year(full: bool, chain: str = CHAIN_HTTP) -> Dict[str, Any]:
+    """One trailing cycle for the trailing year (spec §5.2). Returns
+    {"status": "busy"} without waiting when another pipeline holds the
+    lock.
+
+    ``chain`` picks how the current-year re-render runs when the trailing
+    year's team_years changed: "http" (endpoints) schedules it as its own
+    request; "inline" (job drivers such as reprocess_year, whose process
+    exits when they return) runs it synchronously before returning."""
+    return _run_with_chain(
+        "update_trailing_year", lambda: _update_trailing_year_held(full), chain
+    )
 
 
 def _update_trailing_year_held(full: bool) -> Dict[str, Any]:
@@ -643,6 +674,11 @@ def _update_trailing_year_held(full: bool) -> Dict[str, Any]:
     if not trailing.is_live_year(year):
         print(f"TRAILING {year}: window closed; trailing cycle skipped")
         return {"status": "skipped", "reason": "window-closed", "year": year}
+    if DISABLE_GCS:
+        # Without GCS process_year skips the trailing publish, so there is
+        # nothing to stamp and no snapshot to resume from.
+        print(f"TRAILING {year}: DISABLE_GCS set; trailing cycle skipped")
+        return {"status": "skipped", "reason": "gcs-disabled", "year": year}
 
     start = time.monotonic()
     objs: Optional[objs_type] = None
@@ -705,23 +741,22 @@ def close_needed(manifest: Optional[Any], year: int) -> bool:
     )
 
 
-def close_trailing_year() -> Dict[str, Any]:
+def close_trailing_year(chain: str = CHAIN_HTTP) -> Dict[str, Any]:
     """Window close (spec §7, with the plan's past-year deviation): retire
     the trailing year into an ordinary past year. Stateless and rerunnable:
-    every step is idempotent, so a run that dies is completed by the next."""
-    with try_hold() as held:
-        if not held:
-            print("PIPELINE BUSY: skipped close_trailing_year")
-            return {"status": "busy"}
-        result = _close_trailing_year_held()
-    if result.get("chain"):
-        _schedule_reset_curr_year()
-    return result
+    every step is idempotent, so a run that dies is completed by the next.
+    ``chain`` as for update_trailing_year."""
+    return _run_with_chain("close_trailing_year", _close_trailing_year_held, chain)
 
 
 def _close_trailing_year_held() -> Dict[str, Any]:
     year = trailing.trailing_year()
     start = time.monotonic()
+    if DISABLE_GCS:
+        # Without GCS process_year writes no Parquet or hist blobs: clearing
+        # the marker would retire the year with nothing published.
+        print(f"TRAILING {year} CLOSE not_needed secs={_secs(start)}")
+        return {"status": "not_needed", "year": year, "reason": "gcs-disabled"}
 
     # A ManifestReadError propagates: without the manifest, nothing is known.
     manifest = None if trailing.trailing_window_open() else read_manifest()

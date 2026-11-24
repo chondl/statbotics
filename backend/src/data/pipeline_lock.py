@@ -9,6 +9,12 @@ for the thread that took it through ``try_hold``: the daily sweep holds the
 lock and its reprocess chains the current-year cycle and refresh_teams in
 the same thread, which must run rather than skip as busy. Any other holder
 (another thread, or a direct ``PIPELINE_LOCK.acquire``) makes it yield False.
+
+INVARIANT: a held region must never ``await``. Re-entrancy is keyed on the
+thread, and every ``async def`` handler runs on the one event-loop thread: a
+coroutine that awaited while holding the lock would let a second coroutine
+on that thread pass ``try_hold`` as the "owner" and run concurrently. Hold
+the lock only around synchronous pipeline code.
 """
 
 import threading
