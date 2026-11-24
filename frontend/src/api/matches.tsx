@@ -1,5 +1,4 @@
-import { CURR_YEAR } from "../constants";
-import query, { version } from "./storage";
+import query, { isLiveYear, version } from "./storage";
 
 export async function getNoteworthyMatches(
   year: number,
@@ -36,7 +35,8 @@ export async function getNoteworthyMatches(
 
   suffix += suffixes.length > 0 ? `?${suffixes.join("&")}` : "";
 
-  return query(storageKey, suffix, year === CURR_YEAR, 0, year === CURR_YEAR ? 60 : 60 * 60); // 1 minute / 1 hour
+  const live = await isLiveYear(year);
+  return query(storageKey, suffix, live, 0, live ? 60 : 60 * 60); // 1 minute / 1 hour
 }
 
 export async function getUpcomingMatches(

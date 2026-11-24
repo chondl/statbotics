@@ -1,8 +1,9 @@
 import { get, set } from "idb-keyval";
 import pako from "pako";
 
-import { BACKEND_URL, BUCKET_URL, DISABLE_GCS } from "../constants";
+import { BACKEND_URL, BUCKET_URL, CURR_YEAR, DISABLE_GCS } from "../constants";
 import { log, round } from "../utils";
+import { resolveHistEpoch } from "./yearFromPath";
 
 export const version = "v5";
 
@@ -12,6 +13,8 @@ interface Manifest {
   schema?: number;
   cycle?: string;
   hist_epoch?: number;
+  hist_epochs?: { [year: string]: number };
+  trailing_year?: number | null;
   blobs?: { [logicalPath: string]: string };
 }
 
@@ -46,6 +49,14 @@ async function getManifest(): Promise<Manifest | null> {
   return manifestPromise.promise;
 }
 
+// A live year refreshes continuously: the current year, or the trailing year
+// while the backend's trailing window is open (manifest.trailing_year).
+export async function isLiveYear(year: number): Promise<boolean> {
+  if (year === CURR_YEAR) return true;
+  const manifest = await getManifest();
+  return year === manifest?.trailing_year;
+}
+
 function toLogicalPath(apiPath: string): string {
   return apiPath.replace(/[?&]/g, ".").replace(/^\//, "");
 }
@@ -57,7 +68,7 @@ function resolveBucketUrl(logicalPath: string, manifest: Manifest | null): strin
       return `${BUCKET_URL}/${versioned}`;
     }
     if (manifest.hist_epoch != null) {
-      return `${BUCKET_URL}/hist/${manifest.hist_epoch}/${logicalPath}`;
+      return `${BUCKET_URL}/hist/${resolveHistEpoch(manifest, logicalPath)}/${logicalPath}`;
     }
   }
   return `${BUCKET_URL}/${logicalPath}?t=${Date.now() / 1000 / 60}`;
