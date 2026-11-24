@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Response
 
 from src.constants import BACKEND_URL, CURR_YEAR
 from src.data import main as data_main
+from src.data import trailing
 from src.data.main import refresh_teams, reset_all_years, update_curr_year
 from src.data.sweep import revalidate_tba
 from src.data.tba import check_year_partial as check_year_partial_tba
@@ -133,7 +134,10 @@ def _ping_probe():
 @site_router.get("/ping/event/{event_key}")
 async def ping_event_endpoint(event_key: str, background_tasks: BackgroundTasks):
     global _ping_last_probe, _ping_inflight
-    if not re.fullmatch(rf"{CURR_YEAR}[a-z0-9]+", event_key):
+    keys = [str(CURR_YEAR)]
+    if trailing.trailing_window_open():
+        keys.append(str(trailing.trailing_year()))
+    if not re.fullmatch(rf"(?:{'|'.join(keys)})[a-z0-9]+", event_key):
         return Response(status_code=204)
     now = time.monotonic()
     if _ping_inflight or now - _ping_last_probe < PING_COOLDOWN_S:

@@ -97,3 +97,17 @@ def test_site_update_dbless_snapshot_hit_probes_and_backgrounds(monkeypatch):
     assert resp.json() == {"status": "backgrounded"}
     assert len(calls) == 1
     assert calls[0].endswith("/v3/data/update_curr_year")
+
+
+def test_ping_accepts_trailing_key_while_open(monkeypatch, trailing_open):
+    client, calls = make_client(monkeypatch)
+    resp = client.get(f"/v3/site/ping/event/{CURR_YEAR - 1}iri")
+    assert resp.status_code == 202
+    assert len(calls) == 1
+
+
+def test_ping_rejects_trailing_key_after_close(monkeypatch):
+    client, calls = make_client(monkeypatch)
+    resp = client.get(f"/v3/site/ping/event/{CURR_YEAR - 1}iri")
+    assert resp.status_code == 204
+    assert calls == []
