@@ -6,7 +6,9 @@
   events/{year}, event/{key}, team/{num}/{year}. Render only: uploading is
   year_epoch.publish_past_year's job (tests/test_year_epoch.py). team_years
   without a team row are skipped.
-- process_year's historical branch emits Parquet AND hist blobs db-less.
+- process_year's past-year branch emits Parquet (write_parquet) and then
+  publishes render_site_blobs' output through year_epoch.publish_past_year
+  (per-year hist epochs), db-less.
 - process_year seeds prior-year team_years through the backend read
   (DuckDB-over-Parquet db-less) when all_team_years is None.
 - reprocess_year needs no DB: process_year + chained full current-year

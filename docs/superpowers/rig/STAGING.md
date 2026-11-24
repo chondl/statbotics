@@ -68,9 +68,16 @@ Health: `curl https://api-statbotics.popcornpenguins.com/info`.
 
 DuckDB serves `/v3` for a year from `parquet/{year}/*.parquet`; historical
 pages read `hist/{epoch}/…` blobs. Since DB retirement Phase 3 the pipeline
-emits both for every historical year it processes (`write_parquet` +
-`write_hist_blobs` in `process_year`) — the one-off DB-reading scripts
-(`backfill_parquet.py`, `backfill_blobs.py`) and their jobs are retired.
+emits both for every past year it processes: `process_year` runs
+`write_parquet`, then `year_epoch.publish_past_year`, which publishes the
+year's hist blobs under its per-year year epoch (a changed page moves the
+whole year to a new epoch). The trailing year (`CURR_YEAR − 1`) is the
+exception while its trailing window is open (until Dec 28 00:00
+America/Los_Angeles): it is a live year and publishes versioned blobs and
+Parquet through the manifest, with no hist blobs, until window close retires
+it. See [DATA-REFRESH.md §3](DATA-REFRESH.md#3-when-it-runs--two-automatic-triggers-one-gate).
+The one-off DB-reading scripts (`backfill_parquet.py`, `backfill_blobs.py`)
+and their jobs are retired.
 Rebuild one year with `make reprocess-year YEAR=…`; full history via a
 db-less `reset_all_years` — see
 [historical-backfill.md](../deliverables/historical-backfill.md).
