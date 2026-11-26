@@ -465,16 +465,30 @@ def _joined_matches(
     return [from_row(model, cols, dict(zip(names, row))) for row in cursor.fetchall()]
 
 
-def get_noteworthy_matches(
+# Offseason events are ingested at week 9 (read_tba.py); the site's week filter
+# labels it "Offseason".
+OFFSEASON_WEEK = 9
+
+
+def _noteworthy_filters(
     year: int,
     country: Optional[str],
     state: Optional[str],
     district: Optional[str],
     elim: Optional[bool],
     week: Optional[int],
-) -> Dict[str, List[Match]]:
-    where = ["m.year = ?", "m.status = ?", "e.type != ?"]
-    params: List[Any] = [year, MatchStatus.COMPLETED.value, EventType.OFFSEASON.value]
+) -> Tuple[List[str], List[Any]]:
+    """WHERE clauses for the noteworthy-match leaderboards.
+
+    Offseason games often run modified rules, so their scores stay off the
+    season leaderboards ("All" and weeks 1-8). They appear only when the
+    Offseason week is requested, on a leaderboard of their own.
+    """
+    where = ["m.year = ?", "m.status = ?"]
+    params: List[Any] = [year, MatchStatus.COMPLETED.value]
+    if week != OFFSEASON_WEEK:
+        where.append("e.type != ?")
+        params.append(EventType.OFFSEASON.value)
     e_where, e_params = _event_filters(country, state, district)
     where += e_where
     params += e_params
@@ -484,6 +498,18 @@ def get_noteworthy_matches(
     if week is not None:
         where.append("e.week = ?")
         params.append(week)
+    return where, params
+
+
+def get_noteworthy_matches(
+    year: int,
+    country: Optional[str],
+    state: Optional[str],
+    district: Optional[str],
+    elim: Optional[bool],
+    week: Optional[int],
+) -> Dict[str, List[Match]]:
+    where, params = _noteworthy_filters(year, country, state, district, elim, week)
 
     red = "m.red_score" if year < 2016 else "m.red_no_foul"
     blue = "m.blue_score" if year < 2016 else "m.blue_no_foul"

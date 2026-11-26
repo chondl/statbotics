@@ -8,6 +8,10 @@ import { classnames } from "../../utils";
 
 const lightGray = "#F0F0F0";
 
+// The week filter's "Offseason" option (filterConstants.tsx). The backend ranks
+// offseason matches only when this week is requested.
+const OFFSEASON_WEEK = 9;
+
 type MatchData = {
   high_score: APIMatch[];
   combined_score: APIMatch[];
@@ -155,6 +159,13 @@ const NoteworthyMatches = ({
   return (
     <div className="flex flex-col mb-4">
       <FilterBar defaultFilters={defaultFilters} filters={actualFilters} setFilters={setFilters} />
+      {Number(actualFilters.week) === OFFSEASON_WEEK && (
+        <div className="w-full text-sm mt-4 px-4 py-3 rounded bg-blue-50 border border-blue-200 text-gray-800">
+          Offseason events often play with modified rules, so their matches are ranked only on these
+          Offseason leaderboards and never appear under All or Weeks 1–8. Offseason events are
+          included from 2025 onward.
+        </div>
+      )}
       <div className="flex flex-col">
         {data !== null && !loading ? (
           <>
