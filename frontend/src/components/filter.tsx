@@ -4,6 +4,7 @@ import {
   countryOptions,
   districtOptions,
   usaOptions,
+  weekOptions,
   yearOptions,
 } from "./filterConstants";
 
@@ -19,7 +20,7 @@ export const validateFilters = (
     is_competing: competingOptions,
   };
 
-  // Note: week, playoff, filterMatches, sortMatches are not validated here
+  // Note: playoff, filterMatches, sortMatches are not validated here
 
   for (const key of ["year", "is_competing"]) {
     if (validFilters.includes(key) && filters[key]) {
@@ -27,6 +28,13 @@ export const validateFilters = (
         (x) => x.value?.toLowerCase() === filters[key]?.toLowerCase()
       )?.[0]?.value;
     }
+  }
+
+  // A URL query value is a string ("9"); the week dropdown's values are numbers.
+  if (validFilters.includes("week") && filters["week"]) {
+    outFilters["week"] = weekOptions.find(
+      (x) => x.value !== "" && String(x.value) === String(filters["week"])
+    )?.value;
   }
 
   if (validFilters.includes("country") && filters["country"]) {
